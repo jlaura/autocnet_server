@@ -1,9 +1,8 @@
 import argparse
 import os
+import pickle
 import sys
-
-# Get the server installing
-sys.path.insert(0, os.path.abspath('..'))
+import time
 
 import numpy as np
 import pandas as pd
@@ -11,20 +10,27 @@ import pandas as pd
 from autocnet.matcher.cuda_extractor import extract_features
 from autocnet.utils.utils import tile
 from autocnet.io.keypoints import to_hdf
-from autocnet.camera.csm_camera import create_camera
-from autocnet.cg import footprint
-from autocnet_server.db.model import Images, Keypoints
 
+from autocnet_server.camera.csm_camera import create_camera
+from autocnet_server.camera import footprint
 from autocnet_server.utils.utils import create_output_path
-from autocnet_server.db.connection import db_connect
+from autocnet_server.config import AutoCNet_Config
+from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
 
+
+from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
+from sqlalchemy.orm import create_session, scoped_session, sessionmaker
 from geoalchemy2.elements import WKTElement
 
+import requests
 import json
 
 from plio.io.io_gdal import GeoDataset
 import pyproj
 import ogr
+
+import Pyro4
 
 import autocnet
 funcs = {'vlfeat':autocnet.matcher.cpu_extractor.extract_features}
@@ -32,13 +38,13 @@ funcs = {'vlfeat':autocnet.matcher.cpu_extractor.extract_features}
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("input_file")
+    parser.add_argument("callback_uri", help="The callback URI in the form pyro:<obj_name>@<hostname>:<port>")
     parser.add_argument('-t', '--threshold', help='The threshold difference between DN values')
     parser.add_argument('-n', '--nfeatures', help='The number of features to extract. Default is max_image_dimension / 1.25', type=float)
     parser.add_argument('-m', '--maxsize',type=float, default=6e7, help='The maximum number of pixels before tiling is used to extract keypoints.  Default: 6e7')
     parser.add_argument('-e', '--extractor', default='vlfeat', choices=['cuda', 'vlfeat'], help='The extractor to use to get keypoints.')
     parser.add_argument('-c', '--camera', action='store_false', help='Whether or not to compute keypoints coordinates in body fixed as well as image space.')
     parser.add_argument('-o', '--outdir', type=str, help='The output directory')
-    parser.add_argument('-d','--database', help='The database configuration definition.')
     return vars(parser.parse_args())
 
 def extract(ds, extractor, maxsize):
@@ -81,69 +87,104 @@ def extract(ds, extractor, maxsize):
 
     return keypoints, descriptors
 
-if __name__ == '__main__':
-    #TODO: Tons of logic in here to get extracted
+def finalize(data, callback_uri):
+    for k,v in data.items():
+        if isinstance(v, np.ndarray):
+            data[k] = v.tolist()
+    uri = Pyro4.URI(callback_uri)
+    with Pyro4.Proxy(uri) as obj:
+        obj.add_image_callback(data)
 
+if __name__ == '__main__':
     # Setup the metadata obj that will be written to the db
     metadata = {}
 
     # Parse args and grab the file handle to the image
     kwargs = parse_args()
     input_file = kwargs.pop('input_file', None)
+
+    #TODO: Tons of logic in here to get extracted
+    #try:
+
+    config = AutoCNet_Config()
+    db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
+                                                  config.database_password,
+                                                  config.database_host,
+                                                  config.database_port,
+                                                  config.database_name)
+
     ds = GeoDataset(input_file)
 
-    # Check to see if the image is already in the database
-    # Create a database session to use
-    with open(kwargs['database'], 'r') as f:
-        dbparams = json.load(f)
-    session = db_connect(dbparams)
-    res = session.query(Images).filter(Images.name == ds.base_name).first()
-    if res:
-        print('Image already exists in database.')
-        sys.exit()
+    # Create a camera model for the image
+    camera = kwargs.pop('camera')
+    camera = create_camera(ds)
 
+    #try:
     # Extract the correspondences
     extractor = kwargs.pop('extractor')
     maxsize = kwargs.pop('maxsize')
     keypoints, descriptors = extract(ds, extractor, maxsize)
 
-    # Create a camera model for the image
-    camera = kwargs.pop('camera')
-    if camera:
-        camera = create_camera(ds)
+    # Setup defaults for the footprints
+    footprint_latlon = None
+    footprint_bodyfixed = None
 
-        # Project the sift keypoints to the ground
-        def func(row, args):
-            camera = args[0]
-            gnd = getattr(camera, 'imageToGround')(row[1], row[0], 0)
-            return gnd
+    # Project the sift keypoints to the ground
+    def func(row, args):
+        camera = args[0]
+        gnd = getattr(camera, 'imageToGround')(row[1], row[0], 0)
+        return gnd
 
-        feats = keypoints[['x', 'y']].values
-        gnd = np.apply_along_axis(func, 1, feats, args=(camera, ))
-        gnd = pd.DataFrame(gnd, columns=['xm', 'ym', 'zm'], index=keypoints.index)
-        keypoints = pd.concat([keypoints, gnd], axis=1)
+    feats = keypoints[['x', 'y']].values
+    gnd = np.apply_along_axis(func, 1, feats, args=(camera, ))
+
+    gnd = pd.DataFrame(gnd, columns=['xm', 'ym', 'zm'], index=keypoints.index)
+    keypoints = pd.concat([keypoints, gnd], axis=1)
+
+    footprint_latlon = footprint.generate_latlon_footprint(camera)
+    footprint_latlon = footprint_latlon.ExportToWkt()
+    if footprint_latlon:
+        footprint_latlon = WKTElement(footprint_latlon, srid=config.srid)
+
+    footprint_bodyfixed = footprint.generate_bodyfixed_footprint(camera)
+    footprint_bodyfixed = footprint_bodyfixed.ExportToWkt()
+    if footprint_bodyfixed:
+        footprint_bodyfixed = WKTElement(footprint_bodyfixed)
 
     # Write the correspondences to disk
     outdir = kwargs.pop('outdir')
     outpath = create_output_path(ds, outdir)
     to_hdf(keypoints, descriptors, outpath)
 
-    # Compute the image footprint
-    if camera:
-        footprint_latlon = footprint.generate_latlon_footprint(camera).ExportToWkt()
-        footprint_bodyfixed = footprint.generate_bodyfixed_footprint(camera).ExportToWkt()
-    else:
-        footprint_latlon = None
-        footprint_bodyfixed = None
+    # Default response
+    data = {'success':False,'path':input_file}
 
-    # Write the image to the images db table
-    i = Images(name=ds.base_name, path=ds.file_name, footprint_latlon=footprint_latlon, srid=949900),
-               footprint_bodyfixed=footprint_bodyfixed)
-    session.add(i)
-    session.commit()
+    # Connect to the DB and write
+    maxretries = 3
 
-    # Write the keypoints to the keypoints db table
-    k = Keypoints(image_id=i.id, path=outpath, nkeypoints=len(keypoints))
-    session.add(k)
-    session.commit()
-    session.close()
+    # Create the DB objs
+    camera = pickle.dumps(camera, 2)
+    c = Cameras(camera=camera)
+    k = Keypoints(path=outpath, nkeypoints=len(keypoints))
+    img = Images(name=ds.file_name, path=input_file,
+                 footprint_latlon=footprint_latlon,
+                 cameras=c,keypoints=k)
+
+    # Attempt to grab an available db connection
+    session = None
+    while maxretries:
+        try:
+            engine = create_engine(db_uri, poolclass=NullPool)
+            connection = engine.connect()
+            session = sessionmaker(bind=engine, autoflush=True)()
+            break
+        except:
+            time.sleep(30)
+            maxretries -= 1
+    if session:
+            session.add(img)
+            session.commit()
+            session.close()
+            # Send the success signal to the listener
+            data = {'success':True,'path':input_file}
+    finalize(data, kwargs['callback_uri'])

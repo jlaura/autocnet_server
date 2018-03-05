@@ -1,7 +1,7 @@
 import argparse
 import sys
 import os
-sys.path.insert(0, os.path.abspath('..'))
+#sys.path.insert(0, os.path.abspath('..'))
 from autocnet_server.db.model import Images, Keypoints, Base
 
 from sqlalchemy import create_engine
@@ -22,7 +22,7 @@ def create_db(p):
     engine = create_engine('postgresql://{}:{}@{}:{}/{}'.format(p['username'], p['password'], p['host'], p['port'], p['db']))
     if not database_exists(engine.url):
         create_database(engine.url)
-
+    print('HERE')
     # Enable postgis
     connection = engine.connect()
 
