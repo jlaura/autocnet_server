@@ -97,3 +97,21 @@ class Images(Base):
                 'path':self.path,
                 'footprint_latlon':footprint,
                 'footprint_bodyfixed':self.footprint_bodyfixed})
+
+class Network(Base):
+    __tablename__ = 'network'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    #TODO: Document that images on delete will CASCADE into all other tables
+    image_id = Column(Integer, ForeignKey("images.id", ondelete="CASCADE"))  # Links back to the source image
+    match_id = Column(Integer)
+    point_id = Column(String) # User defined point identifier
+    keypoint_id = Column(Integer)  # id to link to a keypoint in the correct file
+    x = Column(Float)
+    y = Column(Float)
+    geom = Column(Geometry('POINTZ', dimension=3, srid=949900, spatial_index=True))
+    
+class Overlay(Base):
+    __tablename__ = 'overlay'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    geom = Column(Geometry('POLYGONZ', srid=949900, dimension=3, spatial_index=True))
+    overlaps = Column(ARRAY(Integer))

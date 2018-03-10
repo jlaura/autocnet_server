@@ -1,4 +1,5 @@
 from collections import defaultdict
+from itertools import combinations
 import json
 import os
 import pickle
@@ -10,11 +11,12 @@ from concurrent.futures import ThreadPoolExecutor
 from autocnet.graph import node, network, edge
 from autocnet.utils import utils
 from autocnet.io import keypoints as io_keypoints
+from autocnet.transformation.fundamental_matrix import compute_reprojection_error
 
 from autocnet_server.camera.csm_camera import create_camera, ecef_to_latlon
 from autocnet_server.camera import generate_vrt
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
-from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
+from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay
 from autocnet_server.db.connection import db_connect
 from autocnet_server.config import AutoCNet_Config
 
@@ -288,6 +290,10 @@ class NetworkCandidateGraph(network.CandidateGraph):
         self._connection = self._engine.connect()
         self.session = scoped_session(sessionmaker(bind=self._engine))
 
+        # TODO: This adds the tables to the db if they do not exist already
+        Base.metadata.bind = self._engine
+        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__])
+
     @property
     def unmatched_edges(self):
         """
@@ -376,6 +382,65 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 cmd = '{} /home/jlaura/autocnet_server/bin/ring_match.py -p 20'.format(self.config.pybin)
                 spawn(cmd, mem=self.config.processing_memory)
 
+    def create_network(self):
+        oquery = self.session.query(Overlay)
+        mquery = self.session.query(Matches)
+        kquery = self.session.query(Keypoints)
+
+        def check_in(r, poly):
+            p = to_shape(r.geom)
+            return p.within(poly)
+
+        cmds = 0
+        for res in oquery:
+            msg = {}
+
+            poly = to_shape(res.geom)
+            overlaps = res.overlaps
+
+            msg['oid'] = res.id
+            msg['poly'] = poly.wkt
+            msg['overlaps'] = res.overlaps
+            files = kquery.filter(Keypoints.image_id.in_(res.overlaps)).all() 
+            files = {i.image_id:i.path for i in files}
+
+            msg['files'] = files
+            msg['matches'] = {}
+           
+            # Pulling all these matches is a serial bottleneck...
+            for e in combinations(res.overlaps, 2):
+                edge = self.edges[e]['data']
+                m = edge.matches
+                if len(m) > 0:
+                    msg['matches'][str(e)] = m.to_json(double_precision=15)
+            self.processing_queue.put(msg)
+            cmds += 1
+            if cmds % 100 == 0:
+                script = '/home/jlaura/autocnet_server/bin/create_network.py'
+                spawn_jobarr(self.config.pybin, script, cmds, mem=self.config.processing_memory)
+                cmds = 0
+        script = '/home/jlaura/autocnet_server/bin/create_network.py'
+        spawn_jobarr(self.config.pybin, script, cmds, mem=self.config.processing_memory)
+        return
+
+    def create_network_callback(self, msg):
+        if msg['success']:
+            pts = msg['points']
+            to_add = []
+            for p in msg['points']:
+                n = Network(image_id=p['image_id'],
+                            keypoint_id=p.get('keypoint_id', None),
+                            x = p['x'], y = p['y'],
+                            match_id = p.get('match_id', None),
+                            point_id = p.get('point_id', None),
+                            geom = p['geom']) 
+                to_add.append(n)
+            self.session.bulk_save_objects(to_add)
+            self.session.commit()
+
+
+    
+
     @classmethod
     def from_database(cls, config=AutoCNet_Config):
         sc = config()
@@ -433,3 +498,116 @@ class AsynchronousQueueWatcher(threading.Thread):
             callback_func(msg)
         #except:
         #    print('err: ', msg)
+
+class NetworkControlNetwork():
+    def __init__(self, config=AutoCNet_Config):        
+        self.config = config()
+        #TODO: Just use a mixin here since copied from NCG.
+        self._setup_db_connection()
+        self._setup_queues()
+        self._setup_asynchronous_queue_watchers()
+
+    def _from_db(self, table_obj, key='image_id', value=None):
+        """
+        Generic database query to pull the row associated with this node
+        from an arbitrary table. We assume that the row id matches the node_id.
+
+        Parameters
+        ----------
+        table_obj : object
+                    The declared table class (from db.model)
+
+        key : str
+              The name of the column to compare this object's node_id with. For
+              most tables this will be the default, 'image_id' because 'image_id'
+              is the foreign key in the DB. For the Images table (the parent table),
+              the key is simply 'id'.
+        """
+        return self.session.query(table_obj).filter(getattr(table_obj,key) == value).first()
+
+    def _setup_db_connection(self):
+        """
+        Set up a database connection and session(s)
+        """
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(self.config.database_username,
+                                                      self.config.database_password,
+                                                      self.config.database_host,
+                                                      self.config.database_port,
+                                                      self.config.database_name)
+        self._engine = create_engine(db_uri)
+        self._connection = self._engine.connect()
+        self.session = scoped_session(sessionmaker(bind=self._engine))
+
+        # TODO: This adds the tables to the db if they do not exist already
+        Base.metadata.bind = self._engine
+        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__])
+
+    def _setup_queues(self):
+        """
+        Setup a 2 queue redis connection for pushing and pulling work/results
+        """
+        # TODO: Remove hard coding and graph from config
+        self.processing_queue = hq.HotQueue("processor",
+                                            serializer=json,
+                                            host="smalls",
+                                            port=8000,
+                                            db=0)
+        self.completed_queue = hq.HotQueue("completed",
+                                           serializer=json,
+                                           host="smalls",
+                                           port=8000,
+                                           db=0)
+
+    def _setup_asynchronous_queue_watchers(self, nwatchers=3):
+        """
+        Setup a sentinel class to watch the results queue
+        """
+        for i in range(nwatchers):
+            # Set up the sentinel class that watches the registered queues for for messages
+            s = AsynchronousQueueWatcher(self, self.completed_queue)
+            s.setDaemon(True)
+            s.start()
+
+    def generate_overlays(self):
+        # TODO: Method to generate overlays
+        pass
+
+    def create_network(self):
+        oquery = self.session.query(Overlay)
+        mquery = self.session.query(Matches)
+
+        def check_in(r, poly):
+            p = to_shape(r.geom)
+            return p.within(poly)
+
+        fundamentals = {}
+        for res in oquery:
+            if len(res.overlaps) == 2:
+                # Run the suppression algorithm and write to the network obj. (or REDIS)
+                pass
+            else:
+                poly = to_shape(res.geom)
+                overlaps = res.overlaps
+                # Case n > 2 images
+                matches = []
+                # Merge together all of the points from all of the images and grab the fundamental matrices
+                for e in combinations(res.overlaps, 2):
+                    edge = ncg.edges[e]['data']
+                    edge.compute_fundamental_matrix(method='ransac', reproj_threshold=20)
+                    fundamentals[e] = edge['fundamental_matrix']
+                    m = edge.matches
+                    
+                    err = compute_reprojection_error(edge['fundamental_matrix'],
+                                                    make_homogeneous(m[['source_x', 'source_y']].values), 
+                                                    make_homogeneous(m[['destination_x', 'destination_y']].values))
+                
+                    m['strength'] = err
+                    matches.append(m)
+                    
+                    
+                matches = pd.concat(matches)
+                
+                # Of the concatenated matches only a subset intersect the geometry for this overlap, pull these
+                intersects = matches.apply(check_in, args=(poly,), axis=1)
+                matches = matches[intersects]
+                break

@@ -50,7 +50,6 @@ def spawn(command, name='AutoCNet', time='01:00:00', out='/home/jlaura/autocnet_
 
 def spawn_jobarr(py, command, njobs, name='AutoCNet', time='01:00:00',
 mem=2048):
-
     process = subprocess.Popen(['sbatch', '--array', '1-{}'.format(njobs)],
                                 stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE)
