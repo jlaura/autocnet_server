@@ -173,8 +173,8 @@ class NetworkEdge(edge.Edge):
 
     def get_overlapping_indices(self, kps):
         #TODO: Refactor the hard coded projection here - the who graph should have the same projection
-        ecef = pyproj.Proj(proj='geocent', a=3396190.0, b=3376200)
-        lla = pyproj.Proj(proj='longlat', a=3396190, b=3376200)
+        ecef = pyproj.Proj(proj='geocent', a=self.parent.config.geocent_ecef[0], b=self.parent.config.geocent_ecef[1])
+        lla = pyproj.Proj(proj='longlat', a=self.parent.config.longlate_lla[0], b=self.parent.config.longlate_lla[1])
         lons, lats, alts = pyproj.transform(ecef, lla, kps.xm.values, kps.ym.values, kps.zm.values)
         points = [Point(lons[i], lats[i]) for i in range(len(lons))]
         mask = [i for i in range(len(points)) if self.intersection.contains(points[i])]
@@ -401,12 +401,12 @@ class NetworkCandidateGraph(network.CandidateGraph):
             msg['oid'] = res.id
             msg['poly'] = poly.wkt
             msg['overlaps'] = res.overlaps
-            files = kquery.filter(Keypoints.image_id.in_(res.overlaps)).all() 
+            files = kquery.filter(Keypoints.image_id.in_(res.overlaps)).all()
             files = {i.image_id:i.path for i in files}
 
             msg['files'] = files
             msg['matches'] = {}
-           
+
             # Pulling all these matches is a serial bottleneck...
             for e in combinations(res.overlaps, 2):
                 edge = self.edges[e]['data']
@@ -433,13 +433,13 @@ class NetworkCandidateGraph(network.CandidateGraph):
                             x = p['x'], y = p['y'],
                             match_id = p.get('match_id', None),
                             point_id = p.get('point_id', None),
-                            geom = p['geom']) 
+                            geom = p['geom'])
                 to_add.append(n)
             self.session.bulk_save_objects(to_add)
             self.session.commit()
 
 
-    
+
 
     @classmethod
     def from_database(cls, config=AutoCNet_Config):
@@ -500,7 +500,7 @@ class AsynchronousQueueWatcher(threading.Thread):
         #    print('err: ', msg)
 
 class NetworkControlNetwork():
-    def __init__(self, config=AutoCNet_Config):        
+    def __init__(self, config=AutoCNet_Config):
         self.config = config()
         #TODO: Just use a mixin here since copied from NCG.
         self._setup_db_connection()
@@ -596,17 +596,17 @@ class NetworkControlNetwork():
                     edge.compute_fundamental_matrix(method='ransac', reproj_threshold=20)
                     fundamentals[e] = edge['fundamental_matrix']
                     m = edge.matches
-                    
+
                     err = compute_reprojection_error(edge['fundamental_matrix'],
-                                                    make_homogeneous(m[['source_x', 'source_y']].values), 
+                                                    make_homogeneous(m[['source_x', 'source_y']].values),
                                                     make_homogeneous(m[['destination_x', 'destination_y']].values))
-                
+
                     m['strength'] = err
                     matches.append(m)
-                    
-                    
+
+
                 matches = pd.concat(matches)
-                
+
                 # Of the concatenated matches only a subset intersect the geometry for this overlap, pull these
                 intersects = matches.apply(check_in, args=(poly,), axis=1)
                 matches = matches[intersects]
