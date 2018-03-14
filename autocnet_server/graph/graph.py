@@ -172,9 +172,8 @@ class NetworkEdge(edge.Edge):
     #    pass
 
     def get_overlapping_indices(self, kps):
-        #TODO: Refactor the hard coded projection here - the who graph should have the same projection
-        ecef = pyproj.Proj(proj='geocent', a=self.parent.config.geocent_ecef[0], b=self.parent.config.geocent_ecef[1])
-        lla = pyproj.Proj(proj='longlat', a=self.parent.config.longlate_lla[0], b=self.parent.config.longlate_lla[1])
+        ecef = pyproj.Proj(proj='geocent', a=self.parent.config.semimajor_rad, b=self.parent.config.semiminor_rad)
+        lla = pyproj.Proj(proj='longlat', a=self.parent.config.semiminor_rad, b=self.parent.config.semimajor_rad)
         lons, lats, alts = pyproj.transform(ecef, lla, kps.xm.values, kps.ym.values, kps.zm.values)
         points = [Point(lons[i], lats[i]) for i in range(len(lons))]
         mask = [i for i in range(len(points)) if self.intersection.contains(points[i])]

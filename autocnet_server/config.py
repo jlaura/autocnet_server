@@ -48,7 +48,3 @@ class AutoCNet_Config():
 
     ### Working Directories ###
     vrt_dir = '/scratch/jlaura/ctx/vrt'
-    
-    ### Get_overlapping_indices() Variables ###
-    geocent_ecef = [3396190.0, 3376200]
-    longlate_lla = [3396190, 3376200]
