@@ -1,0 +1,30 @@
+version: "3"
+services:
+  db:
+    image: mdillon/postgis:9.6-alpine
+    environment: 
+      POSTGRES_PASSWORD: abcde
+      POSTGRES_USER: jay
+      POSTGRES_DB: kaguyasp
+    volumes: 
+      - "/media/fast/ctx_db:/var/lib/postgresql/data"
+    ports:
+        - "8001:5432"
+  admin:
+      image: jlaura/pgadmin4:0.2
+      ports:
+        - "5050:5050"
+  pfeffernusse:
+      image: jlaura/pfeffernusse
+      ports:
+          - "8002:5000"
+      volumes:
+          - "/data/spice:/data/spice"
+  redis:
+      image: redis:4.0.8-alpine
+      command: redis-server /usr/local/etc/redis/redis.conf
+      volumes:
+           - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+      ports:
+          - "8000:6379"
+
