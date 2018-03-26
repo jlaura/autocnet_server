@@ -383,6 +383,15 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
     def create_network(self):
         oquery = self.session.query(Overlay)
+        cmds = 0
+        for res in query:
+            msg['oid'] = res.id
+            self.processing_queue.put(msg)
+            cmds += 1
+        script = '/home/jlaura/autocnet_server/bin/create_network2.py'
+        spawn_jobarr(self.config.pybin, script, cmds, mem=self.config.processing_memory)
+    '''def create_network(self):
+        oquery = self.session.query(Overlay)
         mquery = self.session.query(Matches)
         kquery = self.session.query(Keypoints)
 
@@ -420,7 +429,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 cmds = 0
         script = '/home/jlaura/autocnet_server/bin/create_network.py'
         spawn_jobarr(self.config.pybin, script, cmds, mem=self.config.processing_memory)
-        return
+        return'''
 
     def create_network_callback(self, msg):
         if msg['success']:
@@ -571,7 +580,7 @@ class NetworkControlNetwork():
         # TODO: Method to generate overlays
         pass
 
-    def create_network(self):
+    '''def create_network(self):
         oquery = self.session.query(Overlay)
         mquery = self.session.query(Matches)
 
@@ -609,4 +618,4 @@ class NetworkControlNetwork():
                 # Of the concatenated matches only a subset intersect the geometry for this overlap, pull these
                 intersects = matches.apply(check_in, args=(poly,), axis=1)
                 matches = matches[intersects]
-                break
+                break'''
