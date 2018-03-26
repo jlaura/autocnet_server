@@ -7,7 +7,7 @@ import socket
 from autocnet_server.cluster.slurm import spawn
 from autocnet_server.db.connection import db_connect
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
-from autocnet_server.config import AutoCNet_Config
+from autocnet_server import config
 from geoalchemy2.elements import WKTElement
 
 from sqlalchemy import create_engine
@@ -19,22 +19,21 @@ import Pyro4
 from threading import Thread
 
 class ImageAdder():
-    def __init__(self, config=AutoCNet_Config):
-        self.config = config()
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(self.config.database_username,
-                                                      self.config.database_password,
-                                                      self.config.database_host,
-                                                      self.config.database_port,
-                                                      self.config.database_name)
+    def __init__(self):
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
+                                                      config.database_password,
+                                                      config.database_host,
+                                                      config.database_port,
+                                                      config.database_name)
         self._engine = create_engine(db_uri)
         self._connection = self._engine.connect()
         self._session = sessionmaker(bind=self._engine)()
         self._daemon = Pyro4.Daemon()
         self._thread = Thread(target=self._daemon.serveSimple,
-                              args=({self : self.config.image_adder_uri},),
+                              args=({self : config.image_adder_uri},),
                               kwargs={'ns':False,
-                                      'port':self.config.image_adder_port,
-                                      'host':self.config.image_adder_host},
+                                      'port':config.image_adder_port,
+                                      'host':config.image_adder_host},
                               daemon=True)
         self._thread.start()
         self.job_status = defaultdict(dict)
@@ -49,19 +48,19 @@ class ImageAdder():
                 return 'Image already processed'
 
         hostname = socket.gethostname()
-        callback_uri = 'PYRO:{}@{}:{}'.format(self.config.image_adder_uri,
+        callback_uri = 'PYRO:{}@{}:{}'.format(config.image_adder_uri,
                                                hostname,
-                                               self.config.image_adder_port)
+                                               config.image_adder_port)
 
         command = '{} /home/jlaura/autocnet_server/bin/extract_features.py {} {}'
-        command = command.format(self.config.pybin, path, callback_uri)
-        if self.config.cluster_log_dir is not None:
-            log_out = self.config.cluster_log_dir + '/%j.log'
+        command = command.format(config.pybin, path, callback_uri)
+        if config.cluster_log_dir is not None:
+            log_out = config.cluster_log_dir + '/%j.log'
         else:
             out = '%j.log'
 
         # Spawn the job and update the submission tracker
-        res = spawn(command, out=log_out, mem=self.config.extractor_memory)
+        res = spawn(command, out=log_out, mem=config.extractor_memory)
         self.job_status[path]['submission'] = res
         self.job_status[path]['count'] = 0
 
@@ -117,5 +116,5 @@ class ImageAdder():
         else:
             self.job_status[d['path']]['count'] += 1
             # Job failed, try again, up to 3 times
-            if self.job_status[d['path']]['count'] <= self.config.maxfailures:
+            if self.job_status[d['path']]['count'] <= config.maxfailures:
                 self.extract(d['path'], force=True)

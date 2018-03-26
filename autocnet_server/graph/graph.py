@@ -18,7 +18,7 @@ from autocnet_server.camera import generate_vrt
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay
 from autocnet_server.db.connection import db_connect
-from autocnet_server.config import AutoCNet_Config
+from autocnet_server import config
 
 from sqlalchemy.orm import aliased, create_session, scoped_session, sessionmaker
 from sqlalchemy import create_engine
@@ -251,9 +251,8 @@ class NetworkCandidateGraph(network.CandidateGraph):
     node_factory = NetworkNode
     edge_factory = NetworkEdge
 
-    def __init__(self, *args, config=AutoCNet_Config, **kwargs):
+    def __init__(self, *args, **kwargs):
         super(NetworkCandidateGraph, self).__init__(*args, **kwargs)
-        self.config = config()
         self._setup_db_connection()
         self._setup_queues()
         self._setup_asynchronous_queue_watchers()
@@ -280,11 +279,11 @@ class NetworkCandidateGraph(network.CandidateGraph):
         """
         Set up a database connection and session(s)
         """
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(self.config.database_username,
-                                                      self.config.database_password,
-                                                      self.config.database_host,
-                                                      self.config.database_port,
-                                                      self.config.database_name)
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
+                                                      config.database_password,
+                                                config.database_host,
+                                                      config.database_port,
+                                                      config.database_name)
         self._engine = create_engine(db_uri)
         self._connection = self._engine.connect()
         self.session = scoped_session(sessionmaker(bind=self._engine))
@@ -450,13 +449,12 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
 
     @classmethod
-    def from_database(cls, config=AutoCNet_Config):
-        sc = config()
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(sc.database_username,
-                                                      sc.database_password,
-                                                      sc.database_host,
-                                                      sc.database_port,
-                                                      sc.database_name)
+    def from_database(cls):
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
+                                                      config.database_password,
+                                                      config.database_host,
+                                                      config.database_port,
+                                                      config.database_name)
         engine = create_engine(db_uri)
         connection = engine.connect()
         session = sessionmaker(bind=engine)()
@@ -508,8 +506,7 @@ class AsynchronousQueueWatcher(threading.Thread):
         #    print('err: ', msg)
 
 class NetworkControlNetwork():
-    def __init__(self, config=AutoCNet_Config):
-        self.config = config()
+    def __init__(self):
         #TODO: Just use a mixin here since copied from NCG.
         self._setup_db_connection()
         self._setup_queues()
@@ -537,11 +534,11 @@ class NetworkControlNetwork():
         """
         Set up a database connection and session(s)
         """
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(self.config.database_username,
-                                                      self.config.database_password,
-                                                      self.config.database_host,
-                                                      self.config.database_port,
-                                                      self.config.database_name)
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
+                                                      config.database_password,
+                                                      config.database_host,
+                                                      config.database_port,
+                                                      config.database_name)
         self._engine = create_engine(db_uri)
         self._connection = self._engine.connect()
         self.session = scoped_session(sessionmaker(bind=self._engine))
