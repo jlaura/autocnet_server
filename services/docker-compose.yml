@@ -12,9 +12,9 @@ services:
         - "8001:5432"
     command: -c shared_buffers=8GB -c max_connections=200
   admin:
-      image: jlaura/pgadmin4:0.2
+      image: thajeztah/pgadmin4
       ports:
-        - "5050:5050"
+        - "8004:5050"
   pgbouncer:
       image: brainsam/pgbouncer
       ports:
