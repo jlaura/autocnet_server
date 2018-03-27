@@ -21,6 +21,7 @@ database_username = 'jay'
 database_password = 'abcde'
 database_host = 'smalls'
 database_port = 8001
+pgbouncer_port = 8003
 # The name of the database to connect to.  Tables will be created inside this DB.
 database_name = 'test2'
 # The number of seconds to wait while attemping to connect to the DB.

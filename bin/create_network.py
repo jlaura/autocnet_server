@@ -1,4 +1,5 @@
 import argparse
+from itertools import combinations
 import json
 import math
 import warnings
@@ -6,6 +7,11 @@ import warnings
 from autocnet.io.keypoints import from_hdf
 from autocnet.transformation.fundamental_matrix import compute_fundamental_matrix, compute_reprojection_error
 from autocnet.utils.utils import make_homogeneous
+
+from autocnet_server import config
+from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay
+
+import sqlalchemy
 
 from geoalchemy2.shape import to_shape
 import hotqueue as hq
@@ -15,7 +21,7 @@ import shapely
 
 def spatial_suppression(df, bounds, xkey='lon', ykey='lat', k=60, error_k=0.05, nsteps=250):
     #TODO: Push this more generalized algorithm back into AutoCNet
-    
+
     # Compute the bounding area inside of which the suppression will be applied
     minx = min(bounds[0], bounds[2])
     maxx = max(bounds[0], bounds[2])
@@ -49,12 +55,12 @@ def spatial_suppression(df, bounds, xkey='lon', ykey='lat', k=60, error_k=0.05, 
         else:
             # Setup to store results
             result = []
-        
+
         # Get the current cell size and grid the domain
         cell_size = cell_sizes[mid_idx]
         n_x_cells = int(round(domain[0] / cell_size, 0)) - 1
         n_y_cells = int(round(domain[1] / cell_size, 0)) - 1
-        
+
         if n_x_cells <= 0:
             n_x_cells = 1
         if n_y_cells <= 0:
@@ -72,16 +78,16 @@ def spatial_suppression(df, bounds, xkey='lon', ykey='lat', k=60, error_k=0.05, 
             x_center = xbins[i] - 1
             y_center = ybins[i] - 1
             cell = grid[y_center, x_center]
-            
+
             if cell == False:
                 result.append(idx)
                 # Set the cell to True
                 grid[y_center, x_center] = True
-                
+
             # If everything is already 'covered' break from the list
             if grid.all() == False:
                 continue
-        
+
         # Check to see if the algorithm is completed, or if the grid size needs to be larger or smaller
         if k - k * error_k <= len(result) <= k + k * error_k:
             # Success, in bounds
@@ -109,12 +115,12 @@ def deepen(matches, fundamentals, overlaps, oid):
     for g, subm in matches.groupby(['source', 'destination']):
         w = int(g[0])
         v = int(g[1])
-            
+
         push_into = [i for i in overlaps if i not in g]
-        
+
         x1 = make_homogeneous(subm[['source_x', 'source_y']].values)
         x2 = make_homogeneous(subm[['destination_x', 'destination_y']].values)
-        
+
         pid = 0
         for i in range(x1.shape[0]):
             row = subm.iloc[i]
@@ -124,20 +130,20 @@ def deepen(matches, fundamentals, overlaps, oid):
 
             p1 = {'image_id':w,
                   'keypoint_id':int(row.source_idx),
-                  'x':float(a[0]), 'y':float(a[1]), 
+                  'x':float(a[0]), 'y':float(a[1]),
                   'match_id':int(row.name),
                   'point_id':'{}_{}_{}'.format(oid, g, pid),
                   'geom':geom}
             p2 = {'image_id':v,
                   'keypoint_id':int(row.destination_idx),
-                  'x':float(b[0]), 'y':float(b[1]), 
+                  'x':float(b[0]), 'y':float(b[1]),
                   'match_id':int(row.name),
                   'point_id':'{}_{}_{}'.format(oid, g, pid),
                   'geom':geom}
-            
+
             points.append(p1)
             points.append(p2)
-                
+
             for e in push_into:
                 try:
                     if w > e:
@@ -145,7 +151,7 @@ def deepen(matches, fundamentals, overlaps, oid):
                         f31 = np.asarray(fundamentals[tuple(f31)]).T
                     else:
                         f31 = [w,e]
-                        f31 = np.asarray(fundamentals[tuple(f31)])     
+                        f31 = np.asarray(fundamentals[tuple(f31)])
 
                     if v > e:
                         f32 = [e,v]
@@ -158,9 +164,9 @@ def deepen(matches, fundamentals, overlaps, oid):
                     x3[0] /= x3[2]
                     x3[1] /= x3[2]
 
-                    # This needs to aggregate all of the 
+                    # This needs to aggregate all of the
                     n = {'image_id':e,
-                        'keypoint_id':None, 
+                        'keypoint_id':None,
                         'x':float(x3[0]), 'y':float(x3[1]),
                         'point_id':'{}_{}_{}'.format(oid, g, pid),
                         'geom':geom, 'match_id':None}
@@ -171,21 +177,42 @@ def deepen(matches, fundamentals, overlaps, oid):
             pid += 1
     return points
 
+def create_session():
+    db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
+                                                  config.database_password,
+                                                  config.database_host,
+                                                  config.pgbouncer_port,
+                                                  config.database_name)
+    engine = sqlalchemy.create_engine(db_uri,
+                                      poolclass=sqlalchemy.pool.NullPool)
+    Session = sqlalchemy.orm.sessionmaker(bind=engine, autocommit=True)
+    return Session()
+
 def main(msg):
-    fp = shapely.wkt.loads(msg['poly'])
-    
-    files = msg['files']
+    oid = msg['oid']
+    session = create_session()
+    overlay_row = session.query(Overlay).get(oid)
+    overlaps = sorted(overlay_row.overlaps)
+
+    footprint = to_shape(overlay_row.geom)
+    files = session.query(Keypoints).filter(Keypoints.image_id.in_(overlaps)).all()
+    files = {i.image_id:i.path for i in files}
+
     # Compute the fundamental matrices
     fundamentals = {}
     matches = []
-    for k, v in msg['matches'].items():
-        edge = eval(k)
-        print(edge)
-        match = pd.read_json(v)
+
+    mquery = session.query(Matches)
+    for e in combinations(overlaps, 2):
+        qf = mquery.filter(Matches.source == e[0],
+                      Matches.destination == e[1])
+        match = pd.read_sql(qf.statement, mquery.session.bind)
+        if len(match) < 7:
+            continue
         s = match.iloc[0].source
         d = match.iloc[0].destination
-        source_path = files[str(edge[0])]
-        destination_path = files[str(edge[1])]
+        source_path = files[e[0]]
+        destination_path = files[e[1]]
 
         x1 = from_hdf(source_path, index=match.source_idx.values, descriptors=False)
         x2 = from_hdf(destination_path, index=match.destination_idx.values, descriptors=False)
@@ -193,25 +220,24 @@ def main(msg):
         x1 = make_homogeneous(x1[['x', 'y']].values)
         x2 = make_homogeneous(x2[['x', 'y']].values)
         f, fmask = compute_fundamental_matrix(x1, x2, method='ransac', reproj_threshold=20)
-        fundamentals[edge] = f
+        fundamentals[e] = f
         match['strength'] = compute_reprojection_error(f, x1, x2)
         matches.append(match)
-    
+    session.close()
     matches = pd.concat(matches)
 
     # Of the concatenated matches only a subset intersect the geometry for this overlap, pull these
-    
     def check_in(r, poly):
         p = shapely.geometry.Point(r.lon, r.lat)
         return p.within(poly)
 
-    intersects = matches.apply(check_in, args=(fp,), axis=1)
+    intersects = matches.apply(check_in, args=(footprint,), axis=1)
     matches = matches[intersects]
     matches = matches.reset_index(drop=True)
 
     # Apply the spatial suppression
-    bounds = fp.bounds
-    k = fp.area / 0.005
+    bounds = footprint.bounds
+    k = footprint.area / 0.005
     if k < 3:
         k = 3
     if k > 25:
@@ -219,8 +245,6 @@ def main(msg):
     subset = spatial_suppression(matches, bounds, k=k)
 
     # Push the points through
-    overlaps = msg['overlaps']
-    oid = msg['oid']
     pts = deepen(subset, fundamentals, overlaps, oid)
 
     return pts
@@ -232,15 +256,34 @@ def finalize(data, queue):
 
     queue.put(data)
 
+def write_to_db(pts):
+    to_add = []
+    for p in pts:
+        n = Network(image_id=p['image_id'],
+                    keypoint_id=p.get('keypoint_id', None),
+                    x = p['x'], y = p['y'],
+                    match_id = p.get('match_id', None),
+                    point_id = p.get('point_id', None),
+                    geom = p['geom'])
+        to_add.append(n)
+    session = create_session()
+    session.begin()
+    session.bulk_save_objects(to_add)
+    session.commit()
+    session.close()
+    
 if __name__ == '__main__':
     queue = hq.HotQueue('processor', serializer=json, host="smalls", port=8000, db=0)
     fqueue = hq.HotQueue('completed', serializer=json, host="smalls", port=8000, db=0)
     msg = queue.get()
-    
+
     data = {}
     pts = main(msg)
-    data['points'] = pts
-    data['success'] = True
-    data['callback'] = 'create_network_callback'
-    
-    finalize(data, fqueue)
+    success = write_to_db(pts)
+    #data['points'] = pts
+    #data['success'] = True
+    #data['callback'] = 'create_network_callback'
+
+    #write_to_database(pts)
+
+    #cafinalize(data, fqueue)
