@@ -10,10 +10,19 @@ services:
       - "/media/fast/ctx_db:/var/lib/postgresql/data"
     ports:
         - "8001:5432"
+    command: -c shared_buffers=8GB -c max_connections=200
   admin:
       image: jlaura/pgadmin4:0.2
       ports:
         - "5050:5050"
+  pgbouncer:
+      image: brainsam/pgbouncer
+      ports:
+        - "8003:6543"
+      volumes:
+        - "./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini"
+        - "./pgbouncer.log:/var/log/pgbouncer/pgbouncer.log"
+        - "./users.txt:/etc/pgbouncer/users.txt"
   pfeffernusse:
       image: jlaura/pfeffernusse
       ports:
