@@ -400,33 +400,67 @@ class NetworkCandidateGraph(network.CandidateGraph):
         spawn_jobarr(config.pybin, script, cmds, mem=config.processing_memory)
 
     @classmethod
-    def from_database(cls):
+    def from_database(cls, query_string='SELECT * FROM Images'):
+        """
+        This is a constructor that takes the results from an arbitrary query string, 
+        uses those as a subquery into a standard polygon overlap query and
+        returns a NetworkCandidateGraph object.  By default, an images
+        in the Image table will be used in the outer query.
+
+        Parameters
+        ----------
+        query_string : str
+                       A valid SQL select statement that targets the Images table
+
+        Usage
+        -----
+        Here, we provide usage examples for a few, potentially common use cases.
+
+        ## Spatial Query
+        This example selects those images that intersect a given bounding polygon.  The polygon is 
+        specified as a Well Known Text LINESTRING with the first and last points being the same.
+        The query says, select the footprint_latlon (the bounding polygons in the database) that
+        intersect the user provided polygon (the LINESTRING) in the given spatial reference system 
+        (SRID), 949900.
+
+        "SELECT * FROM Images WHERE ST_INTERSECTS(footprint_latlon, ST_Polygon(ST_GeomFromText('LINESTRING(159 10, 159 11, 160 11, 160 10, 159 10)'),949900)) = TRUE"
+
+        ## Select from a specific orbit
+        This example selects those images that are from a particular orbit. In this case, 
+        the regex string pulls all P##_* orbits and creates a graph from them. This method
+        does not guarantee that the graph is fully connected.
+
+        "SELECT * FROM Images WHERE (split_part(path, '/', 6) ~ 'P[0-9]+_.+') = True"
+
+        """
         db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
                                                       config.database_password,
                                                       config.database_host,
                                                       config.database_port,
                                                       config.database_name)
+        
+        composite_query = """WITH 
+	i as ({})
+SELECT i1.id as i1_id,i1.path as i1_path, i2.id as i2_id, i2.path as i2_path
+FROM
+	i as i1, i as i2
+WHERE ST_INTERSECTS(i1.footprint_latlon, i2.footprint_latlon) = TRUE
+AND i1.id < i2.id""".format(query_string)
         engine = create_engine(db_uri)
-        connection = engine.connect()
-        session = sessionmaker(bind=engine)()
+        res = engine.execute(composite_query)
 
-        # Add images that overlap
-        image_alias = aliased(Images)
-        query = session.query(Images, image_alias)
-        res = query.filter(Images.id <= image_alias.id).filter(Images.footprint_latlon.ST_Intersects(image_alias.footprint_latlon))
         adjacency = defaultdict(list)
         adjacency_lookup = {}
         for r in res:
-            s = r[0]
-            d = r[1]
-            adjacency_lookup[s.path] = s.id
-            adjacency_lookup[d.path] = d.id
-            if s.path != d.path:
-                adjacency[s.path].append(d.path)
+            sid, spath, did, dpath = r
+            
+            adjacency_lookup[spath] = sid
+            adjacency_lookup[dpath] = did
+            if spath != dpath:
+                adjacency[spath].append(dpath)
 
         # Add nodes that do not overlap any images
         obj = cls.from_adjacency(adjacency, node_id_map=adjacency_lookup, config=config)
-        session.close()
         return obj
 
 class AsynchronousQueueWatcher(threading.Thread):
