@@ -49,6 +49,15 @@ class Keypoints(Base):
                            'path':self.path,
                            'nkeypoints':self.nkeypoints})
 
+class Edges(Base):
+    __tablename__ = 'edges'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(Integer)
+    destination = Column(Integer)
+    ring = Column(ARRAY(Float))
+    fundamental = Column(ARRAY(Float, dimensions=2))
+    active = Column(Boolean)
+
 class Matches(Base):
     __tablename__ = 'matches'
     id = Column(Integer, primary_key=True, autoincrement=True)

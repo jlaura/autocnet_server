@@ -14,10 +14,10 @@ from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Networ
 import sqlalchemy
 
 from geoalchemy2.shape import to_shape
-import hotqueue as hq
 import numpy as np
 import pandas as pd
 import shapely
+from redis import StrictRedis
 
 def spatial_suppression(df, bounds, xkey='lon', ykey='lat', k=60, error_k=0.05, nsteps=250):
     #TODO: Push this more generalized algorithm back into AutoCNet
@@ -273,13 +273,12 @@ def write_to_db(pts):
     session.close()
     
 if __name__ == '__main__':
-    queue = hq.HotQueue('processor', serializer=json, host="smalls", port=8000, db=0)
-    fqueue = hq.HotQueue('completed', serializer=json, host="smalls", port=8000, db=0)
-    msg = queue.get()
+    queue = StrictQueue(host="smalls", port=8000, db=0)
+    msg = json.loads(queue.rpoplpush(config.processing_queue, config.working_queue))
 
     data = {}
     pts = main(msg)
-    success = write_to_db(pts)
+    write_to_db(pts)
     #data['points'] = pts
     #data['success'] = True
     #data['callback'] = 'create_network_callback'

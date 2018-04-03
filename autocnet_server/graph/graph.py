@@ -16,7 +16,7 @@ from autocnet.transformation.fundamental_matrix import compute_reprojection_erro
 from autocnet_server.camera.csm_camera import create_camera, ecef_to_latlon
 from autocnet_server.camera import generate_vrt
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
-from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay
+from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges
 from autocnet_server.db.connection import db_connect
 from autocnet_server import config
 
@@ -31,7 +31,7 @@ import numpy as np
 import pandas as pd
 import pyproj
 
-import hotqueue as hq
+from redis import StrictRedis
 
 class NetworkNode(node.Node):
     def __init__(self, *args, **kwargs):
@@ -200,11 +200,8 @@ class NetworkEdge(edge.Edge):
 
     def ring_match(self, overlap=True):
         # Create the message that parameterizes the job
-        spath = self.source.keypoint_file
-        dpath = self.destination.keypoint_file
-
         msg = {'sidx':self.source['node_id'], 'didx':self.destination['node_id'],
-                'spath':spath, 'dpath':dpath}
+               'time':time.time()}
 
         # Update the job status
         if 'ring_match' not in self.job_status.keys():
@@ -213,7 +210,8 @@ class NetworkEdge(edge.Edge):
             self.job_status['ring_match']['count'] = 0
             self.job_status['ring_match']['success'] = False
         # Put the message onto the redis queue for processing
-        self.parent.processing_queue.put(msg)
+        msg = json.dumps(msg)
+        self.parent.redis_queue.rpush(config.processing_queue, msg)
 
         return True
 
@@ -285,13 +283,13 @@ class NetworkCandidateGraph(network.CandidateGraph):
                                                       config.database_host,
                                                       config.database_port,
                                                       config.database_name)
-        self._engine = create_engine(db_uri)
+        self._engine = create_engine(db_uri, pool_size=2)
         self._connection = self._engine.connect()
         self.session = scoped_session(sessionmaker(bind=self._engine))
 
         # TODO: This adds the tables to the db if they do not exist already
         Base.metadata.bind = self._engine
-        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__])
+        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__, Edges.__table__])
 
     @property
     def unmatched_edges(self):
@@ -312,24 +310,18 @@ class NetworkCandidateGraph(network.CandidateGraph):
         Setup a 2 queue redis connection for pushing and pulling work/results
         """
         # TODO: Remove hard coding and graph from config
-        self.processing_queue = hq.HotQueue("processor",
-                                            serializer=json,
-                                            host="smalls",
-                                            port=8000,
-                                            db=0)
-        self.completed_queue = hq.HotQueue("completed",
-                                           serializer=json,
-                                           host="smalls",
-                                           port=8000,
-                                           db=0)
+        self.redis_queue = StrictRedis(host='smalls',
+                                       port=8000,
+                                       db=0)
 
     def _setup_asynchronous_queue_watchers(self, nwatchers=3):
         """
         Setup a sentinel class to watch the results queue
         """
+        # Set up the consumers of the 'completed' queue
         for i in range(nwatchers):
             # Set up the sentinel class that watches the registered queues for for messages
-            s = AsynchronousQueueWatcher(self, self.completed_queue)
+            s = AsynchronousQueueWatcher(self, self.redis_queue)
             s.setDaemon(True)
             s.start()
 
@@ -337,7 +329,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         for i, n in self.nodes(data='data'):
             n.generate_vrt(**kwargs)
 
-    def ring_match(self, overlap=True, edges=[]):
+    def ring_match(self, overlap=True, edges=[], time='01:00:00'):
         cmds = []
         if edges:
             for e in edges:
@@ -348,7 +340,8 @@ class NetworkCandidateGraph(network.CandidateGraph):
         # TODO: This should not be hard coded, but pulled from the install location
         script = '/home/jlaura/autocnet_server/bin/ring_match.py'
         spawn_jobarr(config.pybin, script,
-                     len(cmds), mem=config.processing_memory)
+                     len(cmds), mem=config.processing_memory,
+                     time=time)
 
         return True
 
@@ -359,11 +352,6 @@ class NetworkCandidateGraph(network.CandidateGraph):
         # Pull the correct edge and dispatch to generate the match objs
         e = self.edges[source, destination]['data']
         if msg['success']:
-            matches = e.add_matches(msg)
-
-            # Bulk insert the matches into the db
-            self.session.bulk_save_objects(matches)
-            self.session.commit()
             e.job_status['ring_match']['success'] = True
         else:
             if 'ring_match' not in e.job_status.keys():
@@ -384,17 +372,18 @@ class NetworkCandidateGraph(network.CandidateGraph):
     def create_network(self, nodes=[]):
         cmds = 0
         for res in self.session.query(Overlay):
-            msg = {'oid':res.id}
+            msg = json.dumps({'oid':res.id,'time':time.time()})
+            
             # If nodes are passed, process only those overlaps containing
             # the provided node(s)
             if nodes:
                 for r in res.overlaps:
                     if r in nodes:
-                        self.processing_queue.put(msg)
+                        self.redis_queue.rpush(config.processing_queue, msg)
                         cmds += 1
                         break
             else:
-                self.processing_queue.put(msg)
+                self.redis_queue.rpush(config.processing_queue, msg)
                 cmds += 1
         script = '/home/jlaura/autocnet_server/bin/create_network.py'
         spawn_jobarr(config.pybin, script, cmds, mem=config.processing_memory)
@@ -484,8 +473,13 @@ class AsynchronousQueueWatcher(threading.Thread):
 
     def run(self):
         #try:
-        for msg in self.queue.consume():
-            callback_func = getattr(self.parent, msg['callback'])
-            callback_func(msg)
+        while True:
+            msg = self.queue.lpop(config.completed_queue)  # or blpop?
+            if msg:
+                msg = json.loads(msg)
+                callback_func = getattr(self.parent, msg['callback'])
+                callback_func(msg)
+            else:
+                time.sleep(5)  # Does this need to sleep?
         #except:
         #    print('err: ', msg)

@@ -60,7 +60,7 @@ class ImageAdder():
             out = '%j.log'
 
         # Spawn the job and update the submission tracker
-        res = spawn(command, out=log_out, mem=config.extractor_memory)
+        res = spawn(command, name='AC_Extract', out=log_out, mem=config.extractor_memory)
         self.job_status[path]['submission'] = res
         self.job_status[path]['count'] = 0
 

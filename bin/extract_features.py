@@ -14,7 +14,7 @@ from autocnet.io.keypoints import to_hdf
 from autocnet_server.camera.csm_camera import create_camera
 from autocnet_server.camera import footprint
 from autocnet_server.utils.utils import create_output_path
-from autocnet_server.config import AutoCNet_Config
+from autocnet_server import config
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
 
 
@@ -106,11 +106,10 @@ if __name__ == '__main__':
     #TODO: Tons of logic in here to get extracted
     #try:
 
-    config = AutoCNet_Config()
     db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
                                                   config.database_password,
                                                   config.database_host,
-                                                  config.database_port,
+                                                  config.pgbouncer_port,
                                                   config.database_name)
 
     ds = GeoDataset(input_file)
