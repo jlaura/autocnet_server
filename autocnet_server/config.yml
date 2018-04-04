@@ -8,6 +8,8 @@ python:
 cluster:
     # The number of times to retry a failing cluster job
     maxfailures: 3
+    # Which processing queue should be used?
+    queue: 'shortall'
     # Location to put <jobid.log> files for cluster jobs
     cluster_log_dir: '/home/jlaura/logs'
     cluster_submission: 'slurm'  # or `pbs`
@@ -64,15 +66,11 @@ developer:
 
 algorithms:
     ring_match:
-        - a:
-            target_points: 25
-            tolerance: 0.01
-        - b:
-            target_points: 20
-            tolerance: 0.01
-        - c:
-            target_points: 20
-            tolerance: 0.02
-        - d:
-            target_points: 15
-            tolerance: 0.025
+        - target_points: 25
+          tolerance: 0.01
+        - target_points: 20
+          tolerance: 0.01
+        - target_points: 20
+          tolerance: 0.02
+        - target_points: 15
+          tolerance: 0.025

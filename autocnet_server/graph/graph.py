@@ -4,6 +4,7 @@ from itertools import combinations
 import json
 import os
 import pickle
+import sys
 import time
 import threading
 
@@ -44,7 +45,8 @@ from autocnet_server.camera.csm_camera import create_camera, ecef_to_latlon
 from autocnet_server.camera import generate_vrt
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges
-from autocnet_server.db.connection import db_connect
+from autocnet_server.db.connection import new_connection
+from autocnet_server.utils.utils import slurm_walltime_to_seconds
 
 class NetworkNode(node.Node):
     def __init__(self, *args, **kwargs):
@@ -151,7 +153,6 @@ class NetworkEdge(edge.Edge):
     def __init__(self, *args, **kwargs):
         super(NetworkEdge, self).__init__(*args, **kwargs)
         self.job_status = defaultdict(dict)
-        self.default_status = {'submission': None, 'count':0, 'success':False}
 
     def _from_db(self, table_obj):
         """
@@ -215,25 +216,20 @@ class NetworkEdge(edge.Edge):
         node = getattr(self, node)
         return self.get_keypoints(node, index=index, homogeneous=homogeneous, overlap=overlap)
 
-    def ring_match(self, overlap=True, target_points=25, tolerance=0.01):
-        # Create the message that parameterizes the job
-        msg = {'sidx':self.source['node_id'],
-               'didx':self.destination['node_id'],
-               'time':time.time(),
-               'target_points':target_points,
-               'tolerance':tolerance}
+    def ring_match(self):
+        if len(self.job_status['ring_match']) == 0:
+            parameters = config['algorithms']['ring_match'][0]
+            self.job_status['ring_match'] = {'sidx':self.source['node_id'],
+                                             'didx':self.destination['node_id'],
+                                             'time':'',
+                                             'task':'ring_match',
+                                             'success':False,
+                                             'param_step':0,
+                                             'count':0,
+                                             'target_points':parameters['target_points'],
+                                             'tolerance':parameters['tolerance']}
 
-        # Update the job status
-        if 'ring_match' not in self.job_status.keys():
-            self.job_status['ring_match'] = {}
-            self.job_status['ring_match']['submission'] = msg
-            self.job_status['ring_match']['count'] = 0
-            self.job_status['ring_match']['success'] = False
-        # Put the message onto the redis queue for processing
-        msg = json.dumps(msg)
-        self.parent.redis_queue.rpush(config['redis']['processing_queue'], msg)
-
-        return True
+        return self.job_status['ring_match']
 
 
 class NetworkCandidateGraph(network.CandidateGraph):
@@ -268,13 +264,14 @@ class NetworkCandidateGraph(network.CandidateGraph):
         """
         Set up a database connection and session(s)
         """
+        
         db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
                                                       config['database']['database_password'],
                                                       config['database']['database_host'],
                                                       config['database']['database_port'],
                                                       config['database']['database_name'])
         self._engine = create_engine(db_uri, pool_size=2)
-        self._connection = self._engine.connect()
+        #self._connection = self._engine.connect()
         self.session = scoped_session(sessionmaker(bind=self._engine))
 
         # TODO: This adds the tables to the db if they do not exist already
@@ -311,55 +308,76 @@ class NetworkCandidateGraph(network.CandidateGraph):
         # Set up the consumers of the 'completed' queue
         for i in range(nwatchers):
             # Set up the sentinel class that watches the registered queues for for messages
-            s = AsynchronousQueueWatcher(self, self.redis_queue)
+            s = AsynchronousQueueWatcher(self, self.redis_queue, config['redis']['completed_queue'])
             s.setDaemon(True)
             s.start()
+
+        # Setup a watcher on the working queue for jobs that fail
+        s = AsynchronousFailedWatcher(self, self.redis_queue, config['redis']['working_queue'])
+        s.setDaemon(True)
+        s.start()
 
     def generate_vrts(self, **kwargs):
         for i, n in self.nodes(data='data'):
             n.generate_vrt(**kwargs)
 
-    def ring_match(self, overlap=True, edges=[], time='01:00:00'):
-        cmds = []
+    def ring_match(self, edges=[], walltime='01:00:00'):
+        t = time.time()
         if edges:
-            for e in edges:
-                cmds.append(self.edges[e]['data'].ring_match(overlap=overlap))
+            for job_counter, e in enumerate(edges):
+                msg = self.edges[e]['data'].ring_match()
+                msg['walltime'] = walltime
+                msg['callback'] = 'ring_matcher_callback'
+                # Put the message onto the redis queue for processing
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
         else:
-            for s, d, e in self.edges(data='data'):
-                cmds.append(e.ring_match(overlap=overlap))
+            for job_counter, (s, d, e) in enumerate(self.edges(data='data')):
+                msg = e.ring_match()
+                msg['walltime'] = walltime
+                msg['callback'] = 'ring_matcher_callback'
+                # Put the message onto the redis queue for processing
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
+        job_counter += 1 # Slurm counter is 1 based.
         # TODO: This should not be hard coded, but pulled from the install location
         script = '/home/jlaura/autocnet_server/bin/ring_match.py'
-        spawn_jobarr(config['python']['pybin'], script,
-                     len(cmds), mem=config['cluster']['processing_memory'],
-                     time=time)
+        spawn_jobarr(config['python']['pybin'], script,job_counter,
+                     mem=config['cluster']['processing_memory'],
+                     time=walltime, queue=config['cluster']['queue'])
 
-        return True
+        return job_counter
+        
 
     def ring_matcher_callback(self, msg):
-        source = msg['source']
-        destination = msg['destin']
+        source = msg['sidx']
+        destination = msg['didx']
 
         # Pull the correct edge and dispatch to generate the match objs
         e = self.edges[source, destination]['data']
+        rm = e.job_status['ring_match']
         if msg['success']:
-            e.job_status['ring_match']['success'] = True
+            rm['success'] = True
         else:
-            if e.job_status['ring_match']['count'] <= config['cluster']['maxfailures']:
-                e.job_status['ring_match']['count'] += 1
-                target_points = msg['target_points']
-                tolerance = msg['tolerance']
-                target_points -= 5
-                tolerance += 0.01
-                if target_points < 15:
-                    break
+            if rm['count'] <= config['cluster']['maxfailures']:
+                rm['count'] += 1
+                rm['param_step'] += 1
+                if rm['param_step'] >= len(config['algorithms']['ring_match']):
+                    # All parameter combinations are exhausted
+                    return
+                # Increment the parameter space defined in the config
+                current_param_step = rm['param_step']
+                parameters = config['algorithms']['ring_match'][current_param_step]
+                rm['target_points'] = parameters['target_points']
+                rm['tolerance'] = parameters['tolerance']
+                
                 # Respawn the job using the normal slurm method
-                e.ring_match(target_points=target_points, tolerance=tolerance)
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(rm))
                 # This hard coded command is poor form in that this is making the ring_matcher
                 # now parameterize differently, what we want to do here is think about adding
                 # some devision making to the system - if matching well fails, reduce either
                 # the threshold tolerance or the number of required 'good' points
                 cmd = '{} /home/jlaura/autocnet_server/bin/ring_match.py'.format(config['python']['pybin'])
-                spawn(cmd, mem=config['cluster']['processing_memory'])
+                spawn(cmd, mem=config['cluster']['processing_memory'],
+                      time=rm['time'], queue=config['cluster']['queue'])
 
     def create_network(self, nodes=[]):
         cmds = 0
@@ -378,7 +396,9 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 self.redis_queue.rpush(config['redis']['processing_queue'], msg)
                 cmds += 1
         script = '/home/jlaura/autocnet_server/bin/create_network.py'
-        spawn_jobarr(config['python']['pybin'], script, cmds, mem=config['cluster']['processing_memory'])
+        spawn_jobarr(config['python']['pybin'], script, cmds,
+                    mem=config['cluster']['processing_memory'],
+                    queue=config['cluster']['queue'])
 
     @classmethod
     def from_database(cls, query_string='SELECT * FROM Images'):
@@ -413,12 +433,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
         "SELECT * FROM Images WHERE (split_part(path, '/', 6) ~ 'P[0-9]+_.+') = True"
 
-        """
-    	db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
-                                                      config['database']['database_password'],
-            	                                      config['database']['database_host'],
-                                                      config['database']['pgbouncer_port'],
-                                                      config['database']['database_name'])        
+        """ 
         composite_query = """WITH 
 	i as ({})
 SELECT i1.id as i1_id,i1.path as i1_path, i2.id as i2_id, i2.path as i2_path
@@ -426,7 +441,7 @@ FROM
 	i as i1, i as i2
 WHERE ST_INTERSECTS(i1.footprint_latlon, i2.footprint_latlon) = TRUE
 AND i1.id < i2.id""".format(query_string)
-        engine = create_engine(db_uri)
+        _, engine = new_connection()     
         res = engine.execute(composite_query)
 
         adjacency = defaultdict(list)
@@ -445,7 +460,7 @@ AND i1.id < i2.id""".format(query_string)
 
 class AsynchronousQueueWatcher(threading.Thread):
 
-    def __init__(self, parent, queue):
+    def __init__(self, parent, queue, name):
         """len(k)
         Parameters
         ----------
@@ -461,16 +476,52 @@ class AsynchronousQueueWatcher(threading.Thread):
         super(AsynchronousQueueWatcher, self).__init__()
         self.queue = queue
         self.parent = parent
+        self.name = name
 
     def run(self):
-        #try:
+
         while True:
-            msg = self.queue.lpop(config['redis']['completed_queue'])  # or blpop?
+            msg = self.queue.lpop(self.name)  # or blpop?
             if msg:
                 msg = json.loads(msg)
                 callback_func = getattr(self.parent, msg['callback'])
                 callback_func(msg)
-            else:
-                time.sleep(5)  # Does this need to sleep?
-        #except:
-        #    print('err: ', msg)
+
+class AsynchronousFailedWatcher(threading.Thread):
+
+    def __init__(self, parent, queue, name):
+        """len(k)
+        Parameters
+        ----------
+        parent : obj
+                 The parent object with callback funcs that this class
+                 dispathces to when a queue has messages.
+
+        queues : dict
+                 with key as the queue name and value as the callback function
+                 name
+
+        """
+        super(AsynchronousFailedWatcher, self).__init__()
+        self.queue = queue
+        self.parent = parent
+        self.name = name
+
+    def run(self):
+        #try:
+        while True:
+            msgs = self.queue.lrange(self.name, 0, -1)
+            to_pop_and_resubmit = []
+            t = time.time()
+            for msg in msgs:
+                msg = json.loads(msg)
+                if  t > msg['max_time'] + 30:  # 10 is the approx buffer that slurm offers
+                    to_pop_and_resubmit.append(msg)
+
+            # Remove the message from the work queue is it is expired.
+            for msg in to_pop_and_resubmit:
+                callback_func = getattr(self.parent, msg['callback'])
+                self.queue.lrem(self.name,0, json.dumps(msg))      
+                callback_func(msg)
+            
+            

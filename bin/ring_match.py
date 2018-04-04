@@ -25,11 +25,12 @@ if acp:
 
 asp = config.get('developer', {}).get('autocnet_server_path', None)
 if asp:
-    sys.path.insert(0, acp)
+    sys.path.insert(0, asp)
 
 from autocnet_server.camera.csm_camera import ecef_to_latlon
 from autocnet_server.db import connection
 from autocnet_server.db.model import Keypoints, Matches, Cameras, Edges
+from autocnet_server.utils.utils import slurm_walltime_to_seconds
 from autocnet.matcher.cpu_ring_matcher import ring_match, add_correspondences
 from autocnet.io.keypoints import from_hdf
 
@@ -50,7 +51,7 @@ def match(msg, args):
     tolerance = msg['tolerance']
 
     print('Processing Edge: ({},{})'.format(source_id, destin_id))
-    session = connection.new_connection()
+    session, _ = connection.new_connection()
     sfile = session.query(Keypoints).filter(Keypoints.image_id == source_id).first().path
     dfile = session.query(Keypoints).filter(Keypoints.image_id == destin_id).first().path
     camera = pickle.loads(session.query(Cameras).filter(Cameras.image_id == source_id).first().camera)
@@ -62,7 +63,7 @@ def match(msg, args):
 
     # Default message
     data = {'success':False,
-            'source': msg['sidx'], 'destin': msg['didx'],
+            'sidx': msg['sidx'], 'didx': msg['didx'],
             'callback':'ring_matcher_callback'}
 
     ref_feats = ref_kps[['x', 'y', 'xm', 'ym', 'zm']].values
@@ -163,7 +164,7 @@ def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
     
     e = Edges(source=msg['sidx'], destination=msg['didx'], ring=ring)
 
-    session = connection.new_connection()
+    session, _ = connection.new_connection()
     session.begin()
     session.bulk_save_objects(to_add)
     session.add(e)
@@ -173,9 +174,19 @@ def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
 if __name__ == '__main__':
     args = parse_args()
     queue = StrictRedis( host="smalls", port=8000, db=0)
-    msg = json.loads(queue.rpoplpush(config['redis']['processing_queue'], 
-				     config['redis']['working_queue']))
+    # Load the message out of the processing queue and add a max processing time key
+    msg = json.loads(queue.rpop(config['redis']['processing_queue']))
+    msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
+    
+    # Push the message to the processing queue with the updated max_time
+    queue.lpush(config['redis']['working_queue'], json.dumps(msg))
+
+    # Apply the matcher
     data, to_db = match(msg, args)
+    
+    # Write to the database if successful
     if data['success']:
         write_to_db(*to_db, msg)
+    
+    # Alert the caller on failure to relaunch with next parameter set
     finalize(data, queue, msg)
