@@ -1,12 +1,13 @@
 import argparse
 import sys
 import os
-#sys.path.insert(0, os.path.abspath('..'))
-from autocnet_server.db.model import Images, Keypoints, Base
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy_utils import database_exists, create_database
+
+
+from autocnet_server.db.model import Images, Keypoints, Base
 
 def parse_args():
     parser = argparse.ArgumentParser()

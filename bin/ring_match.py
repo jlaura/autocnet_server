@@ -10,22 +10,34 @@ import ogr
 import h5py
 import pyproj
 from geoalchemy2.shape import to_shape
+from redis import StrictRedis
+
+import yaml
+
+#Load the config file
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
+# Patch in dev. versions if requested.
+acp = config.get('developer', {}).get('autocnet_path', None)
+if acp:
+    sys.path.insert(0, acp)
+
+asp = config.get('developer', {}).get('autocnet_server_path', None)
+if asp:
+    sys.path.insert(0, acp)
 
 from autocnet_server.camera.csm_camera import ecef_to_latlon
-from autocnet_server import config
 from autocnet_server.db import connection
 from autocnet_server.db.model import Keypoints, Matches, Cameras, Edges
 from autocnet.matcher.cpu_ring_matcher import ring_match, add_correspondences
 from autocnet.io.keypoints import from_hdf
 
-from redis import StrictRedis
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', '--ringradius', default=100)
     parser.add_argument('-m', '--maxradius', default=1200)
-    parser.add_argument('-p', '--targetpoints', type=int, default=25)
-    parser.add_argument('-t', '--tolerance', default=0.01)
     return parser.parse_args()
 
 def match(msg, args):
@@ -34,6 +46,9 @@ def match(msg, args):
     # DB
     source_id = msg['sidx']
     destin_id = msg['didx']
+    target_points = msg['target_points']
+    tolerance = msg['tolerance']
+
     print('Processing Edge: ({},{})'.format(source_id, destin_id))
     session = connection.new_connection()
     sfile = session.query(Keypoints).filter(Keypoints.image_id == source_id).first().path
@@ -58,8 +73,8 @@ def match(msg, args):
                                   ref_desc, tar_desc,
                                   ring_radius=args.ringradius,
                                   max_radius=args.maxradius,
-                                  target_points=args.targetpoints,
-                                  tolerance_val=args.tolerance)
+                                  target_points=target_points,
+                                  tolerance_val=tolerance)
 
 
     if pidx is None:
@@ -119,10 +134,10 @@ def finalize(data, queue, msg):
         if isinstance(v, np.ndarray):
             data[k] = v.tolist()
 
-    queue.rpush(config.completed_queue, json.dumps(data))
+    queue.rpush(config['redis']['completed_queue'], json.dumps(data))
 
     # Now that work is done, clean out the 'working queue'
-    queue.lrem(config.working_queue, 0, json.dumps(msg))
+    queue.lrem(config['redis']['working_queue'], 0, json.dumps(msg))
 
 def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
     
@@ -158,7 +173,9 @@ def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
 if __name__ == '__main__':
     args = parse_args()
     queue = StrictRedis( host="smalls", port=8000, db=0)
-    msg = json.loads(queue.rpoplpush(config.processing_queue, config.working_queue))
+    msg = json.loads(queue.rpoplpush(config['redis']['processing_queue'], 
+				     config['redis']['working_queue']))
     data, to_db = match(msg, args)
-    write_to_db(*to_db, msg)
+    if data['success']:
+        write_to_db(*to_db, msg)
     finalize(data, queue, msg)
