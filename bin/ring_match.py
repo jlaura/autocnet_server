@@ -1,6 +1,8 @@
 import argparse
+import copy
 import json
 import os
+import pickle
 import sys
 import time
 
@@ -8,73 +10,73 @@ import numpy as np
 import ogr
 import h5py
 import pyproj
+from geoalchemy2.shape import to_shape
+from redis import StrictRedis
 
+import yaml
+
+#Load the config file
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
+# Patch in dev. versions if requested.
+acp = config.get('developer', {}).get('autocnet_path', None)
+if acp:
+    sys.path.insert(0, acp)
+
+asp = config.get('developer', {}).get('autocnet_server_path', None)
+if asp:
+    sys.path.insert(0, asp)
+
+from autocnet_server.camera.csm_camera import ecef_to_latlon
+from autocnet_server.db import connection
+from autocnet_server.db.model import Keypoints, Matches, Cameras, Edges
+from autocnet_server.utils.utils import slurm_walltime_to_seconds
 from autocnet.matcher.cpu_ring_matcher import ring_match, add_correspondences
 from autocnet.io.keypoints import from_hdf
 
-import hotqueue as hq
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', '--ringradius', default=100)
     parser.add_argument('-m', '--maxradius', default=1200)
-    parser.add_argument('-p', '--targetpoints', type=int, default=25)
-    parser.add_argument('-t', '--tolerance', default=0.01)
     return parser.parse_args()
 
 def match(msg, args):
 
-    #try:
-    # Load the npz file
+    # Get the s/d ids from the message queue and then grab the paths from the
+    # DB
+    source_id = msg['sidx']
+    destin_id = msg['didx']
+    target_points = msg['target_points']
+    tolerance = msg['tolerance']
 
-    ref_kps, ref_desc = from_hdf(msg['spath'])
-    tar_kps, tar_desc = from_hdf(msg['dpath'])
+    print('Processing Edge: ({},{})'.format(source_id, destin_id))
+    session, _ = connection.new_connection()
+    sfile = session.query(Keypoints).filter(Keypoints.image_id == source_id).first().path
+    dfile = session.query(Keypoints).filter(Keypoints.image_id == destin_id).first().path
+    camera = pickle.loads(session.query(Cameras).filter(Cameras.image_id == source_id).first().camera)
+    session.close()
+
+    # Grab the reference and target keypoints
+    ref_kps, ref_desc = from_hdf(sfile)
+    tar_kps, tar_desc = from_hdf(dfile)
 
     # Default message
     data = {'success':False,
-            'source': msg['sidx'], 'destin': msg['didx'],
+            'sidx': msg['sidx'], 'didx': msg['didx'],
             'callback':'ring_matcher_callback'}
-
-    #TODO: Pull geom out - the ring matcher can handle all and singe we already
-    # read all the kps, we are good to go.
-    """    if 'geom' in msg.keys():
-        fp = ogr.CreateGeometryFromWkt(msg['geom'])
-        # Get the ref_kps that overlap
-        ecef = pyproj.Proj(proj='geocent', a=3396190.0, b=3376200)
-        lla = pyproj.Proj(proj='longlat', a=3396190, b=3376200)
-
-        lons, lats, alts = pyproj.transform(ecef, lla, ref_kps.xm.values, ref_kps.ym.values, ref_kps.zm.values)
-        ref_idx = []
-        for i in range(len(lons)):
-            g = ogr.Geometry(ogr.wkbPoint)
-            g.AddPoint(lons[i], lats[i])
-            if fp.Contains(g):
-                ref_idx.append(i)
-
-        lons, lats, alts = pyproj.transform(ecef, lla, tar_kps.xm.values, tar_kps.ym.values, tar_kps.zm.values)
-        tar_idx = []
-        for i in range(len(lons)):
-            g = ogr.Geometry(ogr.wkbPoint)
-            g.AddPoint(lons[i], lats[i])
-            if fp.Contains(g):
-                tar_idx.append(i)
-
-        ref_kps = ref_kps.iloc[ref_idx]
-        ref_desc = ref_desc[ref_idx]
-        ref_index = sindex[ref_idx]
-        tar_kps = tar_kps.iloc[tar_idx]
-        tar_desc = tar_desc[tar_idx]
-        tar_index = dindex[tar_idx]"""
 
     ref_feats = ref_kps[['x', 'y', 'xm', 'ym', 'zm']].values
     tar_feats = tar_kps[['x', 'y', 'xm', 'ym', 'zm']].values
 
+    # Ring Match
     _, _, pidx, ring = ring_match(ref_feats, tar_feats,
                                   ref_desc, tar_desc,
                                   ring_radius=args.ringradius,
                                   max_radius=args.maxradius,
-                                  target_points=args.targetpoints,
-                                  tolerance_val=args.tolerance)
+                                  target_points=target_points,
+                                  tolerance_val=tolerance)
 
 
     if pidx is None:
@@ -96,7 +98,6 @@ def match(msg, args):
                                       search_radius=int(args.ringradius / 3),
                                       max_search_radius=args.ringradius)
     refs_to_add = [i for i in refs_to_add if len(i)]
-
     if refs_to_add:
         print('Adding {} correspondences'.format(len(refs_to_add)))
         stacked_refs_to_add = np.vstack(refs_to_add)
@@ -111,39 +112,83 @@ def match(msg, args):
         pidx = sorted_data[row_mask]
     else:
         print('no additional references to add')
-
+    
     # Check for duplicates
-    l = pidx[:
-    ,1].tolist()
+    l = pidx[:,1].tolist()
     clean = [i for i, x in enumerate(l) if l.count(x) == 1]
+    if len(clean) < len(pidx):
+        print('Col1: ', pidx)
     pidx = pidx[clean, :]
 
-    # Convert from the found indices into the footprint indices
-    #ref_idx = ref_feats[pidx[:,0]].index.values  # all_kps[kps_in_overlap][selected]
-    #tar_idx = tar_feats[pidx[:,1]].index.values
+    l = pidx[:,0].tolist()
+    clean = [i for i, x in enumerate(l) if l.count(x) == 1]
+    if len(clean) < len(pidx):
+        print('Col0 ', pidx)
+    pidx = pidx[clean, :]
 
     # Package the data to round trip to the server
     data['success'] = True
-    data['sidx'] = pidx[:,0]
-    data['didx'] = pidx[:,1]
-    data['ring'] = ring
+    return data, (pidx, ref_feats[pidx[:,0]], tar_feats[pidx[:,1]], ring, camera)
 
-    print(data)
+def finalize(data, queue, msg):
 
-    return data
-
-def finalize(data, queue):
     for k, v in data.items():
         if isinstance(v, np.ndarray):
             data[k] = v.tolist()
 
-    queue.put(data)
+    queue.rpush(config['redis']['completed_queue'], json.dumps(data))
 
+    # Now that work is done, clean out the 'working queue'
+    queue.lrem(config['redis']['working_queue'], 0, json.dumps(msg))
+
+def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
+    
+    to_add = []
+    for i, row in enumerate(pidx):
+        sidx = int(row[0])
+        didx = int(row[1])
+        sx = float(refkps[i][0])
+        sy = float(refkps[i][1])
+        dx = float(tarkps[i][0])
+        dy = float(tarkps[i][1])
+        # Use the source camera to project the sx, sy to ground
+        gnd = camera.imageToGround(sy, sx, 0)
+        lon, lat, alt = ecef_to_latlon(gnd)
+        # TODO: Hard coded srid needs to be set at the project level
+        geom = 'SRID=949900;POINTZ({} {} {})'.format(lon, lat, alt)
+        m = Matches(source=msg['sidx'], source_idx=sidx,
+                    destination=msg['didx'], destination_idx=didx,
+                    lat=float(lat), lon=float(lon), geom=geom,
+                    source_x=sx, source_y=sy,
+                    destination_x=dx, destination_y=dy)
+        to_add.append(m) 
+    
+    e = Edges(source=msg['sidx'], destination=msg['didx'], ring=ring)
+
+    session, _ = connection.new_connection()
+    session.begin()
+    session.bulk_save_objects(to_add)
+    session.add(e)
+    session.commit()
+    session.close()
 
 if __name__ == '__main__':
     args = parse_args()
-    queue = hq.HotQueue('processor', serializer=json, host="smalls", port=8000, db=0)
-    fqueue = hq.HotQueue('completed', serializer=json, host="smalls", port=8000, db=0)
-    msg = queue.get()
-    data = match(msg, args)
-    finalize(data, fqueue)
+    queue = StrictRedis( host="smalls", port=8000, db=0)
+    # Load the message out of the processing queue and add a max processing time key
+    msg = json.loads(queue.rpop(config['redis']['processing_queue']))
+    omsg = copy.copy(msg)
+    msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
+    
+    # Push the message to the processing queue with the updated max_time
+    queue.lpush(config['redis']['working_queue'], json.dumps(msg))
+
+    # Apply the matcher
+    data, to_db = match(msg, args)
+    
+    # Write to the database if successful
+    if data['success']:
+        write_to_db(*to_db, msg)
+    
+    # Alert the caller on failure to relaunch with next parameter set
+    finalize(data, queue, omsg)

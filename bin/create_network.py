@@ -3,21 +3,38 @@ from itertools import combinations
 import json
 import math
 import warnings
+import os
+import sys
+
+import sqlalchemy
+
+from geoalchemy2.shape import to_shape
+import numpy as np
+import pandas as pd
+import shapely
+from redis import StrictRedis
+import yaml
+
+#Load the config file
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
+# Patch in dev. versions if requested.
+acp = config.get('developer', {}).get('autocnet_path', None)
+if acp:
+    sys.path.insert(0, acp)
+
+asp = config.get('developer', {}).get('autocnet_server_path', None)
+if asp:
+    sys.path.insert(0, acp)
 
 from autocnet.io.keypoints import from_hdf
 from autocnet.transformation.fundamental_matrix import compute_fundamental_matrix, compute_reprojection_error
 from autocnet.utils.utils import make_homogeneous
 
-from autocnet_server import config
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay
+from autocnet_server.db.connection import new_connection
 
-import sqlalchemy
-
-from geoalchemy2.shape import to_shape
-import hotqueue as hq
-import numpy as np
-import pandas as pd
-import shapely
 
 def spatial_suppression(df, bounds, xkey='lon', ykey='lat', k=60, error_k=0.05, nsteps=250):
     #TODO: Push this more generalized algorithm back into AutoCNet
@@ -177,17 +194,6 @@ def deepen(matches, fundamentals, overlaps, oid):
             pid += 1
     return points
 
-def create_session():
-    db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
-                                                  config.database_password,
-                                                  config.database_host,
-                                                  config.pgbouncer_port,
-                                                  config.database_name)
-    engine = sqlalchemy.create_engine(db_uri,
-                                      poolclass=sqlalchemy.pool.NullPool)
-    Session = sqlalchemy.orm.sessionmaker(bind=engine, autocommit=True)
-    return Session()
-
 def main(msg):
     oid = msg['oid']
     session = create_session()
@@ -266,20 +272,20 @@ def write_to_db(pts):
                     point_id = p.get('point_id', None),
                     geom = p['geom'])
         to_add.append(n)
-    session = create_session()
+    session = new_connection()
     session.begin()
     session.bulk_save_objects(to_add)
     session.commit()
     session.close()
     
 if __name__ == '__main__':
-    queue = hq.HotQueue('processor', serializer=json, host="smalls", port=8000, db=0)
-    fqueue = hq.HotQueue('completed', serializer=json, host="smalls", port=8000, db=0)
-    msg = queue.get()
+    queue = StrictRedis(host="smalls", port=8000, db=0)
+    msg = json.loads(queue.rpoplpush(config['redis']['processing_queue'],
+                                     config['redis']['working_queue']))
 
     data = {}
     pts = main(msg)
-    success = write_to_db(pts)
+    write_to_db(pts)
     #data['points'] = pts
     #data['success'] = True
     #data['callback'] = 'create_network_callback'

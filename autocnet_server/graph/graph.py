@@ -1,24 +1,12 @@
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from itertools import combinations
 import json
 import os
 import pickle
+import sys
 import time
 import threading
-
-from concurrent.futures import ThreadPoolExecutor
-
-from autocnet.graph import node, network, edge
-from autocnet.utils import utils
-from autocnet.io import keypoints as io_keypoints
-from autocnet.transformation.fundamental_matrix import compute_reprojection_error
-
-from autocnet_server.camera.csm_camera import create_camera, ecef_to_latlon
-from autocnet_server.camera import generate_vrt
-from autocnet_server.cluster.slurm import spawn, spawn_jobarr
-from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay
-from autocnet_server.db.connection import db_connect
-from autocnet_server import config
 
 from sqlalchemy.orm import aliased, create_session, scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -31,7 +19,34 @@ import numpy as np
 import pandas as pd
 import pyproj
 
-import hotqueue as hq
+from redis import StrictRedis
+
+import yaml
+
+#Load the config file
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
+# Patch in dev. versions if requested.
+acp = config.get('developer', {}).get('autocnet_path', None)
+if acp:
+    sys.path.insert(0, acp)
+
+asp = config.get('developer', {}).get('autocnet_server_path', None)
+if asp:
+    sys.path.insert(0, acp)
+
+from autocnet.graph import node, network, edge
+from autocnet.utils import utils
+from autocnet.io import keypoints as io_keypoints
+from autocnet.transformation.fundamental_matrix import compute_reprojection_error
+
+from autocnet_server.camera.csm_camera import create_camera, ecef_to_latlon
+from autocnet_server.camera import generate_vrt
+from autocnet_server.cluster.slurm import spawn, spawn_jobarr
+from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges
+from autocnet_server.db.connection import new_connection
+from autocnet_server.utils.utils import slurm_walltime_to_seconds
 
 class NetworkNode(node.Node):
     def __init__(self, *args, **kwargs):
@@ -128,7 +143,7 @@ class NetworkNode(node.Node):
         Using the image footprint, generate a VRT to that is usable inside
         of a GIS (QGIS or ArcGIS) to visualize a warped version of this image.
         """
-        outpath = self.parent.config.vrt_dir
+        outpath = self.parent.config['directories']['vrt_dir']
         generate_vrt.warped_vrt(self.camera, self.geodata.raster_size,
                                 self.geodata.file_name, outpath=outpath)
     #def _clean(self):
@@ -138,7 +153,6 @@ class NetworkEdge(edge.Edge):
     def __init__(self, *args, **kwargs):
         super(NetworkEdge, self).__init__(*args, **kwargs)
         self.job_status = defaultdict(dict)
-        self.default_status = {'submission': None, 'count':0, 'success':False}
 
     def _from_db(self, table_obj):
         """
@@ -173,8 +187,12 @@ class NetworkEdge(edge.Edge):
     #    pass
 
     def get_overlapping_indices(self, kps):
-        ecef = pyproj.Proj(proj='geocent', a=self.parent.config.semimajor_rad, b=self.parent.config.semiminor_rad)
-        lla = pyproj.Proj(proj='longlat', a=self.parent.config.semiminor_rad, b=self.parent.config.semimajor_rad)
+        ecef = pyproj.Proj(proj='geocent',
+			   a=self.parent.config['spatial']['semimajor_rad'],
+			   b=self.parent.config['spatial']['semiminor_rad'])
+        lla = pyproj.Proj(proj='longlat',
+			  a=self.parent.config['spatial']['semiminor_rad'], 
+			  b=self.parent.config['spatial']['.semimajor_rad'])
         lons, lats, alts = pyproj.transform(ecef, lla, kps.xm.values, kps.ym.values, kps.zm.values)
         points = [Point(lons[i], lats[i]) for i in range(len(lons))]
         mask = [i for i in range(len(points)) if self.intersection.contains(points[i])]
@@ -198,55 +216,21 @@ class NetworkEdge(edge.Edge):
         node = getattr(self, node)
         return self.get_keypoints(node, index=index, homogeneous=homogeneous, overlap=overlap)
 
-    def ring_match(self, overlap=True):
-        # Create the message that parameterizes the job
-        spath = self.source.keypoint_file
-        dpath = self.destination.keypoint_file
+    def ring_match(self):
+        if len(self.job_status['ring_match']) == 0:
+            parameters = config['algorithms']['ring_match'][0]
+            self.job_status['ring_match'] = {'sidx':self.source['node_id'],
+                                             'didx':self.destination['node_id'],
+                                             'time':'',
+                                             'task':'ring_match',
+                                             'success':False,
+                                             'param_step':0,
+                                             'count':0,
+                                             'target_points':parameters['target_points'],
+                                             'tolerance':parameters['tolerance']}
 
-        msg = {'sidx':self.source['node_id'], 'didx':self.destination['node_id'],
-                'spath':spath, 'dpath':dpath}
+        return self.job_status['ring_match']
 
-        # Update the job status
-        if 'ring_match' not in self.job_status.keys():
-            self.job_status['ring_match'] = {}
-            self.job_status['ring_match']['submission'] = msg
-            self.job_status['ring_match']['count'] = 0
-            self.job_status['ring_match']['success'] = False
-        # Put the message onto the redis queue for processing
-        self.parent.processing_queue.put(msg)
-
-        return True
-
-    def add_matches(self, d):
-        self['ring'] = d['ring']
-        source_idx = d['sidx']
-        destin_idx = d['didx']
-        s = self.source
-        d = self.destination
-        matches = []
-        skps = s.get_keypoints(index=source_idx)
-        dkps = d.get_keypoints(index=destin_idx)
-        #skps and dkps will come out sorted by the indices
-
-        for i, j in zip(source_idx, destin_idx):
-            sidx = int(i)
-            didx = int(j)
-            sx = float(skps.loc[i][0])
-            sy = float(skps.loc[i][1])
-            dx = float(dkps.loc[j][0])
-            dy = float(dkps.loc[j][1])
-            # Use the source camera to project the sx, sy to ground
-            gnd = s.camera.imageToGround(sy, sx, 0)
-            lon, lat, alt = ecef_to_latlon(gnd)
-            # TODO: Hard coded srid needs to be set at the project level
-            geom = 'SRID=949900;POINTZ({} {} {})'.format(lon, lat, alt)
-            m = Matches(source=s['node_id'], source_idx=sidx,
-                        destination=d['node_id'], destination_idx=didx,
-                        lat=float(lat), lon=float(lon), geom=geom,
-                        source_x=sx, source_y=sy,
-                        destination_x=dx, destination_y=dy)
-            matches.append(m)
-        return matches
 
 class NetworkCandidateGraph(network.CandidateGraph):
     node_factory = NetworkNode
@@ -280,18 +264,19 @@ class NetworkCandidateGraph(network.CandidateGraph):
         """
         Set up a database connection and session(s)
         """
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
-                                                      config.database_password,
-                                                      config.database_host,
-                                                      config.database_port,
-                                                      config.database_name)
-        self._engine = create_engine(db_uri)
-        self._connection = self._engine.connect()
+        
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
+                                                      config['database']['database_password'],
+                                                      config['database']['database_host'],
+                                                      config['database']['database_port'],
+                                                      config['database']['database_name'])
+        self._engine = create_engine(db_uri, pool_size=2)
+        #self._connection = self._engine.connect()
         self.session = scoped_session(sessionmaker(bind=self._engine))
 
         # TODO: This adds the tables to the db if they do not exist already
         Base.metadata.bind = self._engine
-        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__])
+        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__, Edges.__table__])
 
     @property
     def unmatched_edges(self):
@@ -312,92 +297,108 @@ class NetworkCandidateGraph(network.CandidateGraph):
         Setup a 2 queue redis connection for pushing and pulling work/results
         """
         # TODO: Remove hard coding and graph from config
-        self.processing_queue = hq.HotQueue("processor",
-                                            serializer=json,
-                                            host="smalls",
-                                            port=8000,
-                                            db=0)
-        self.completed_queue = hq.HotQueue("completed",
-                                           serializer=json,
-                                           host="smalls",
-                                           port=8000,
-                                           db=0)
+        self.redis_queue = StrictRedis(host='smalls',
+                                       port=8000,
+                                       db=0)
 
     def _setup_asynchronous_queue_watchers(self, nwatchers=3):
         """
         Setup a sentinel class to watch the results queue
         """
+        # Set up the consumers of the 'completed' queue
         for i in range(nwatchers):
             # Set up the sentinel class that watches the registered queues for for messages
-            s = AsynchronousQueueWatcher(self, self.completed_queue)
+            s = AsynchronousQueueWatcher(self, self.redis_queue, config['redis']['completed_queue'])
             s.setDaemon(True)
             s.start()
+
+        # Setup a watcher on the working queue for jobs that fail
+        s = AsynchronousFailedWatcher(self, self.redis_queue, config['redis']['working_queue'])
+        s.setDaemon(True)
+        s.start()
 
     def generate_vrts(self, **kwargs):
         for i, n in self.nodes(data='data'):
             n.generate_vrt(**kwargs)
 
-    def ring_match(self, overlap=True, edges=[]):
-        cmds = []
+    def ring_match(self, edges=[], walltime='01:00:00'):
+        t = time.time()
         if edges:
-            for e in edges:
-                cmds.append(self.edges[e]['data'].ring_match(overlap=overlap))
+            for job_counter, e in enumerate(edges):
+                msg = self.edges[e]['data'].ring_match()
+                msg['walltime'] = walltime
+                msg['callback'] = 'ring_matcher_callback'
+                # Put the message onto the redis queue for processing
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
         else:
-            for s, d, e in self.edges(data='data'):
-                cmds.append(e.ring_match(overlap=overlap))
+            for job_counter, (s, d, e) in enumerate(self.edges(data='data')):
+                msg = e.ring_match()
+                msg['walltime'] = walltime
+                msg['callback'] = 'ring_matcher_callback'
+                # Put the message onto the redis queue for processing
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
+        job_counter += 1 # Slurm counter is 1 based.
         # TODO: This should not be hard coded, but pulled from the install location
         script = '/home/jlaura/autocnet_server/bin/ring_match.py'
-        spawn_jobarr(config.pybin, script,
-                     len(cmds), mem=config.processing_memory)
+        spawn_jobarr(config['python']['pybin'], script,job_counter,
+                     mem=config['cluster']['processing_memory'],
+                     time=walltime, queue=config['cluster']['queue'])
 
-        return True
+        return job_counter
+        
 
     def ring_matcher_callback(self, msg):
-        source = msg['source']
-        destination = msg['destin']
+        source = msg['sidx']
+        destination = msg['didx']
 
         # Pull the correct edge and dispatch to generate the match objs
         e = self.edges[source, destination]['data']
+        rm = e.job_status['ring_match']
         if msg['success']:
-            matches = e.add_matches(msg)
-
-            # Bulk insert the matches into the db
-            self.session.bulk_save_objects(matches)
-            self.session.commit()
-            e.job_status['ring_match']['success'] = True
+            rm['success'] = True
         else:
-            if 'ring_match' not in e.job_status.keys():
-                cmd = '{} /home/jlaura/autocnet_server/bin/ring_match.py -p 20'.format(config.pybin)
-                spawn(cmd, mem=config.processing_memory)
-
-            elif e.job_status['ring_match']['count'] <= config.maxfailures:
-                e.job_status['ring_match']['count'] += 1
+            if rm['count'] <= config['cluster']['maxfailures']:
+                rm['count'] += 1
+                rm['param_step'] += 1
+                if rm['param_step'] >= len(config['algorithms']['ring_match']):
+                    # All parameter combinations are exhausted
+                    return
+                # Increment the parameter space defined in the config
+                current_param_step = rm['param_step']
+                parameters = config['algorithms']['ring_match'][current_param_step]
+                rm['target_points'] = parameters['target_points']
+                rm['tolerance'] = parameters['tolerance']
+                
                 # Respawn the job using the normal slurm method
-                e.ring_match()
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(rm))
                 # This hard coded command is poor form in that this is making the ring_matcher
                 # now parameterize differently, what we want to do here is think about adding
                 # some devision making to the system - if matching well fails, reduce either
                 # the threshold tolerance or the number of required 'good' points
-                cmd = '{} /home/jlaura/autocnet_server/bin/ring_match.py -p 20'.format(config.pybin)
-                spawn(cmd, mem=config.processing_memory)
+                cmd = '{} /home/jlaura/autocnet_server/bin/ring_match.py'.format(config['python']['pybin'])
+                spawn(cmd, mem=config['cluster']['processing_memory'],
+                      time=rm['time'], queue=config['cluster']['queue'])
 
     def create_network(self, nodes=[]):
         cmds = 0
         for res in self.session.query(Overlay):
-            msg = {'oid':res.id}
+            msg = json.dumps({'oid':res.id,'time':time.time()})
+            
             # If nodes are passed, process only those overlaps containing
             # the provided node(s)
             if nodes:
                 for r in res.overlaps:
                     if r in nodes:
-                        self.processing_queue.put(msg)
+                        self.redis_queue.rpush(config['redis']['processing_queue'], msg)
                         cmds += 1
                         break
             else:
-                self.processing_queue.put(msg)
+                self.redis_queue.rpush(config['redis']['processing_queue'], msg)
                 cmds += 1
         script = '/home/jlaura/autocnet_server/bin/create_network.py'
-        spawn_jobarr(config.pybin, script, cmds, mem=config.processing_memory)
+        spawn_jobarr(config['python']['pybin'], script, cmds,
+                    mem=config['cluster']['processing_memory'],
+                    queue=config['cluster']['queue'])
 
     @classmethod
     def from_database(cls, query_string='SELECT * FROM Images'):
@@ -432,13 +433,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
         "SELECT * FROM Images WHERE (split_part(path, '/', 6) ~ 'P[0-9]+_.+') = True"
 
-        """
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
-                                                      config.database_password,
-                                                      config.database_host,
-                                                      config.database_port,
-                                                      config.database_name)
-        
+        """ 
         composite_query = """WITH 
 	i as ({})
 SELECT i1.id as i1_id,i1.path as i1_path, i2.id as i2_id, i2.path as i2_path
@@ -446,7 +441,7 @@ FROM
 	i as i1, i as i2
 WHERE ST_INTERSECTS(i1.footprint_latlon, i2.footprint_latlon) = TRUE
 AND i1.id < i2.id""".format(query_string)
-        engine = create_engine(db_uri)
+        _, engine = new_connection()     
         res = engine.execute(composite_query)
 
         adjacency = defaultdict(list)
@@ -465,7 +460,7 @@ AND i1.id < i2.id""".format(query_string)
 
 class AsynchronousQueueWatcher(threading.Thread):
 
-    def __init__(self, parent, queue):
+    def __init__(self, parent, queue, name):
         """len(k)
         Parameters
         ----------
@@ -481,11 +476,52 @@ class AsynchronousQueueWatcher(threading.Thread):
         super(AsynchronousQueueWatcher, self).__init__()
         self.queue = queue
         self.parent = parent
+        self.name = name
+
+    def run(self):
+
+        while True:
+            msg = self.queue.lpop(self.name)  # or blpop?
+            if msg:
+                msg = json.loads(msg)
+                callback_func = getattr(self.parent, msg['callback'])
+                callback_func(msg)
+
+class AsynchronousFailedWatcher(threading.Thread):
+
+    def __init__(self, parent, queue, name):
+        """len(k)
+        Parameters
+        ----------
+        parent : obj
+                 The parent object with callback funcs that this class
+                 dispathces to when a queue has messages.
+
+        queues : dict
+                 with key as the queue name and value as the callback function
+                 name
+
+        """
+        super(AsynchronousFailedWatcher, self).__init__()
+        self.queue = queue
+        self.parent = parent
+        self.name = name
 
     def run(self):
         #try:
-        for msg in self.queue.consume():
-            callback_func = getattr(self.parent, msg['callback'])
-            callback_func(msg)
-        #except:
-        #    print('err: ', msg)
+        while True:
+            msgs = self.queue.lrange(self.name, 0, -1)
+            to_pop_and_resubmit = []
+            t = time.time()
+            for msg in msgs:
+                msg = json.loads(msg)
+                if  t > msg['max_time'] + 30:  # 10 is the approx buffer that slurm offers
+                    to_pop_and_resubmit.append(msg)
+
+            # Remove the message from the work queue is it is expired.
+            for msg in to_pop_and_resubmit:
+                callback_func = getattr(self.parent, msg['callback'])
+                self.queue.lrem(self.name,0, json.dumps(msg))      
+                callback_func(msg)
+            
+            

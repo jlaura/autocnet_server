@@ -6,23 +6,10 @@ import time
 
 import numpy as np
 import pandas as pd
-
-from autocnet.matcher.cuda_extractor import extract_features
-from autocnet.utils.utils import tile
-from autocnet.io.keypoints import to_hdf
-
-from autocnet_server.camera.csm_camera import create_camera
-from autocnet_server.camera import footprint
-from autocnet_server.utils.utils import create_output_path
-from autocnet_server.config import AutoCNet_Config
-from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
-
-
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import create_session, scoped_session, sessionmaker
 from geoalchemy2.elements import WKTElement
-
 import requests
 import json
 
@@ -31,6 +18,31 @@ import pyproj
 import ogr
 
 import Pyro4
+
+import yaml
+#Load the config file
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
+# Patch in dev. versions if requested.
+acp = config.get('developer', {}).get('autocnet_path', None)
+if acp:
+    sys.path.insert(0, acp)
+
+asp = config.get('developer', {}).get('autocnet_server_path', None)
+if asp:
+    sys.path.insert(0, acp)
+
+from autocnet.matcher.cuda_extractor import extract_features
+from autocnet.utils.utils import tile
+from autocnet.io.keypoints import to_hdf
+
+from autocnet_server.camera.csm_camera import create_camera
+from autocnet_server.camera import footprint
+from autocnet_server.utils.utils import create_output_path
+from autocnet_server import config
+from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
+from autocnet_server.db.connection import new_connection()
 
 import autocnet
 funcs = {'vlfeat':autocnet.matcher.cpu_extractor.extract_features}
@@ -106,13 +118,11 @@ if __name__ == '__main__':
     #TODO: Tons of logic in here to get extracted
     #try:
 
-    config = AutoCNet_Config()
-    db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
-                                                  config.database_password,
-                                                  config.database_host,
-                                                  config.database_port,
-                                                  config.database_name)
-
+    db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
+                                                  config['database']['database_password'],
+                                                  config['database']['database_host'],
+                                                  config['database']['pgbouncer_port'],
+                                                  config['database']['database_name'])
     ds = GeoDataset(input_file)
 
     # Create a camera model for the image
@@ -144,7 +154,7 @@ if __name__ == '__main__':
     footprint_latlon = footprint.generate_latlon_footprint(camera)
     footprint_latlon = footprint_latlon.ExportToWkt()
     if footprint_latlon:
-        footprint_latlon = WKTElement(footprint_latlon, srid=config.srid)
+        footprint_latlon = WKTElement(footprint_latlon, srid=config['spatial']['srid'])
 
     footprint_bodyfixed = footprint.generate_bodyfixed_footprint(camera)
     footprint_bodyfixed = footprint_bodyfixed.ExportToWkt()
