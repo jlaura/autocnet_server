@@ -176,11 +176,7 @@ if __name__ == '__main__':
     queue = StrictRedis( host="smalls", port=8000, db=0)
     # Load the message out of the processing queue and add a max processing time key
     msg = json.loads(queue.rpop(config['redis']['processing_queue']))
-<<<<<<< HEAD
     msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
-=======
-    msg['max_time'] = time.time + slurm_walltime_to_seconds(msg['walltime'])
->>>>>>> 101cd1219bd670ed0d0b81477d516afdba73b31a
     
     # Push the message to the processing queue with the updated max_time
     queue.lpush(config['redis']['working_queue'], json.dumps(msg))

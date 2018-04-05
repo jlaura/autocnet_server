@@ -33,6 +33,8 @@ database:
 
 # Redis Configuration
 redis:
+    host: 'smalls'
+    port: '8000'
     completed_queue: 'athabasca:done'
     processing_queue: 'athabasca:proc'
     working_queue: 'athabasca:working'
