@@ -76,3 +76,9 @@ algorithms:
           tolerance: 0.02
         - target_points: 15
           tolerance: 0.025
+
+
+### Database Creation - DO NOT CHANGE ###
+database_creation:
+    admin: 'jay'
+    password: 'abcde'
