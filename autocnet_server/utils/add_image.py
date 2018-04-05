@@ -3,11 +3,10 @@ import glob
 import json
 import os
 import socket
+import yaml
 
 from autocnet_server.cluster.slurm import spawn
-from autocnet_server.db.connection import db_connect
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
-from autocnet_server import config
 from geoalchemy2.elements import WKTElement
 
 from sqlalchemy import create_engine
@@ -18,22 +17,26 @@ from shapely.geometry import shape
 import Pyro4
 from threading import Thread
 
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
 class ImageAdder():
     def __init__(self):
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config.database_username,
-                                                      config.database_password,
-                                                      config.database_host,
-                                                      config.database_port,
-                                                      config.database_name)
+
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
+                                                                                   config['database']['database_password'],
+                                                                                   config['database']['database_host'],
+                                                                                   config['database']['database_port'],
+                                                                                   config['database']['database_name'])
         self._engine = create_engine(db_uri)
         self._connection = self._engine.connect()
         self._session = sessionmaker(bind=self._engine)()
         self._daemon = Pyro4.Daemon()
         self._thread = Thread(target=self._daemon.serveSimple,
-                              args=({self : config.image_adder_uri},),
+                              args=({self : config['pyro']['image_adder_uri']},),
                               kwargs={'ns':False,
-                                      'port':config.image_adder_port,
-                                      'host':config.image_adder_host},
+                                      'port':config['pyro']['image_adder_port'],
+                                      'host':config['pyro']['image_adder_host']},
                               daemon=True)
         self._thread.start()
         self.job_status = defaultdict(dict)
@@ -48,19 +51,20 @@ class ImageAdder():
                 return 'Image already processed'
 
         hostname = socket.gethostname()
-        callback_uri = 'PYRO:{}@{}:{}'.format(config.image_adder_uri,
-                                               hostname,
-                                               config.image_adder_port)
 
-        command = '{} /home/jlaura/autocnet_server/bin/extract_features.py {} {}'
-        command = command.format(config.pybin, path, callback_uri)
-        if config.cluster_log_dir is not None:
-            log_out = config.cluster_log_dir + '/%j.log'
+        callback_uri = 'PYRO:{}@{}:{}'.format(config['pyro']['image_adder_uri'],
+                                                                       hostname,
+                                                                       config['pyro']['image_adder_port'])
+
+        command = '{} /home/acpaquette/repos/autocnet_server/bin/extract_features.py {} {}'
+        command = command.format(config['python']['pybin'], path, callback_uri)
+        if config['cluster']['cluster_log_dir'] is not None:
+            log_out = config['cluster']['cluster_log_dir']  + '/%j.log'
         else:
             out = '%j.log'
 
         # Spawn the job and update the submission tracker
-        res = spawn(command, name='AC_Extract', out=log_out, mem=config.extractor_memory)
+        res = spawn(command, name='AC_Extract', out=log_out, mem=config['cluster']['extractor_memory'])
         self.job_status[path]['submission'] = res
         self.job_status[path]['count'] = 0
 
@@ -116,5 +120,5 @@ class ImageAdder():
         else:
             self.job_status[d['path']]['count'] += 1
             # Job failed, try again, up to 3 times
-            if self.job_status[d['path']]['count'] <= config.maxfailures:
+            if self.job_status[d['path']]['count'] <= config['cluster']['maxfailures']:
                 self.extract(d['path'], force=True)

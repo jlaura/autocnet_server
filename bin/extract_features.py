@@ -13,7 +13,6 @@ from geoalchemy2.elements import WKTElement
 import requests
 import json
 
-from plio.io.io_gdal import GeoDataset
 import pyproj
 import ogr
 
@@ -31,8 +30,9 @@ if acp:
 
 asp = config.get('developer', {}).get('autocnet_server_path', None)
 if asp:
-    sys.path.insert(0, acp)
+    sys.path.insert(0, asp)
 
+from plio.io.io_gdal import GeoDataset
 from autocnet.matcher.cuda_extractor import extract_features
 from autocnet.utils.utils import tile
 from autocnet.io.keypoints import to_hdf
@@ -40,9 +40,8 @@ from autocnet.io.keypoints import to_hdf
 from autocnet_server.camera.csm_camera import create_camera
 from autocnet_server.camera import footprint
 from autocnet_server.utils.utils import create_output_path
-from autocnet_server import config
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
-from autocnet_server.db.connection import new_connection()
+from autocnet_server.db.connection import new_connection
 
 import autocnet
 funcs = {'vlfeat':autocnet.matcher.cpu_extractor.extract_features}
