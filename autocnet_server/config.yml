@@ -11,7 +11,7 @@ cluster:
     # Which processing queue should be used?
     queue: 'shortall'
     # Location to put <jobid.log> files for cluster jobs
-    cluster_log_dir: '/home/jlaura/logs'
+    cluster_log_dir: '/home/tthatcher/logs'
     cluster_submission: 'slurm'  # or `pbs`
     tmp_scratch_dir: '/scratch/jlaura'
 
@@ -21,13 +21,14 @@ cluster:
 
 ### Database Configuration ###
 database:
-    database_username: 'jlaura'
-    database_password: 'jlaura'
+    database_username: ''
+    database_password: ''
     database_host: 'smalls'
     database_port: 8001
     pgbouncer_port: 8003
     # The name of the database to connect to.  Tables will be created inside this DB.
-    database_name: 'athabasca'
+    # This CANNOT be anything but lowercase format e.g. exampledb
+    database_name: ''
     # The number of seconds to wait while attemping to connect to the DB.
     timeout: 500
 
@@ -35,14 +36,14 @@ database:
 redis:
     host: 'smalls'
     port: '8000'
-    completed_queue: 'athabasca:done'
-    processing_queue: 'athabasca:proc'
-    working_queue: 'athabasca:working'
+    completed_queue: 'tthatcherAutoC:done'
+    processing_queue: 'tthatcherAutoC:proc'
+    working_queue: 'tthatcherAutoC:working'
 
 pyro:
     ### Image Adder Configuration ###
     image_adder_uri: 'ia'
-    image_adder_port: 8005
+    image_adder_port: 8009
     image_adder_host: '0.0.0.0'
 
     ### Candidate Graph Configuration ###
@@ -63,8 +64,8 @@ directories:
 
 ### Developer PATHS ###
 developer:
-    autocnet_path: '/home/jlaura/autocnet'
-    autocnet_server_path: '/home/jlaura/autocnet_server'
+    autocnet_path: '/home/tthatcher/Desktop/Projects/Autocnet/autocnet_server'
+    autocnet_server_path: '/home/tthatcher/Desktop/Projects/Autocnet/autocnet'
 
 algorithms:
     ring_match:
@@ -76,7 +77,6 @@ algorithms:
           tolerance: 0.02
         - target_points: 15
           tolerance: 0.025
-
 
 ### Database Creation - DO NOT CHANGE ###
 database_creation:
