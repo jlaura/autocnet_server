@@ -177,18 +177,19 @@ if __name__ == '__main__':
     queue = StrictRedis( host="smalls", port=8000, db=0)
     # Load the message out of the processing queue and add a max processing time key
     msg = json.loads(queue.rpop(config['redis']['processing_queue']))
+    print('FROM QUEUE: ', msg)
     omsg = copy.copy(msg)
     msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
     
     # Push the message to the processing queue with the updated max_time
     queue.lpush(config['redis']['working_queue'], json.dumps(msg))
-
+    print('CurrentWorkingLen', queue.llen(config['redis']['working_queue']))
     # Apply the matcher
     data, to_db = match(msg, args)
     
     # Write to the database if successful
     if data['success']:
         write_to_db(*to_db, msg)
-    
+    print('KEY:', omsg)
     # Alert the caller on failure to relaunch with next parameter set
     finalize(data, queue, omsg)
