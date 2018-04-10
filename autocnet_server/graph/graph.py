@@ -36,7 +36,7 @@ if acp:
 
 asp = config.get('developer', {}).get('autocnet_server_path', None)
 if asp:
-    sys.path.insert(0, acp)
+    sys.path.insert(0, asp)
 
 from autocnet.graph import node, network, edge
 from autocnet.utils import utils
@@ -193,7 +193,7 @@ class NetworkEdge(edge.Edge):
 			   a=self.parent.config['spatial']['semimajor_rad'],
 			   b=self.parent.config['spatial']['semiminor_rad'])
         lla = pyproj.Proj(proj='longlat',
-			  a=self.parent.config['spatial']['semiminor_rad'], 
+			  a=self.parent.config['spatial']['semiminor_rad'],
 			  b=self.parent.config['spatial']['.semimajor_rad'])
         lons, lats, alts = pyproj.transform(ecef, lla, kps.xm.values, kps.ym.values, kps.zm.values)
         points = [Point(lons[i], lats[i]) for i in range(len(lons))]
@@ -266,7 +266,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         """
         Set up a database connection and session(s)
         """
-        
+
         db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
                                                       config['database']['database_password'],
                                                       config['database']['database_host'],
@@ -376,13 +376,13 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
         job_counter += 1 # Slurm counter is 1 based.
         # TODO: This should not be hard coded, but pulled from the install location
-        script = '/home/jlaura/autocnet_server/bin/ring_match.py'
+        script = '/home/acpaquette/repos/autocnet_server/bin/ring_match.py'
         spawn_jobarr(config['python']['pybin'], script,job_counter,
                      mem=config['cluster']['processing_memory'],
                      time=walltime, queue=config['cluster']['queue'])
 
         return job_counter
-        
+
 
     def ring_matcher_callback(self, msg):
         source = msg['sidx']
@@ -412,7 +412,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 # now parameterize differently, what we want to do here is think about adding
                 # some devision making to the system - if matching well fails, reduce either
                 # the threshold tolerance or the number of required 'good' points
-                cmd = '{} /home/jlaura/autocnet_server/bin/ring_match.py'.format(config['python']['pybin'])
+                cmd = '{} /home/acpaquette/repos/autocnet_server/bin/ring_match.py'.format(config['python']['pybin'])
                 spawn(cmd, mem=config['cluster']['processing_memory'],
                       time=msg['walltime'], queue=config['cluster']['queue'])
 
@@ -420,7 +420,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         cmds = 0
         for res in self.session.query(Overlay):
             msg = json.dumps({'oid':res.id,'time':time.time()})
-            
+
             # If nodes are passed, process only those overlaps containing
             # the provided node(s)
             if nodes:
@@ -432,7 +432,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
             else:
                 self.redis_queue.rpush(config['redis']['processing_queue'], msg)
                 cmds += 1
-        script = '/home/jlaura/autocnet_server/bin/create_network.py'
+        script = '/home/acpaquette/repos/autocnet_server/bin/create_network.py'
         spawn_jobarr(config['python']['pybin'], script, cmds,
                     mem=config['cluster']['processing_memory'],
                     queue=config['cluster']['queue'])
@@ -440,7 +440,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
     @classmethod
     def from_database(cls, query_string='SELECT * FROM public.Images'):
         """
-        This is a constructor that takes the results from an arbitrary query string, 
+        This is a constructor that takes the results from an arbitrary query string,
         uses those as a subquery into a standard polygon overlap query and
         returns a NetworkCandidateGraph object.  By default, an images
         in the Image table will be used in the outer query.
@@ -455,37 +455,37 @@ class NetworkCandidateGraph(network.CandidateGraph):
         Here, we provide usage examples for a few, potentially common use cases.
 
         ## Spatial Query
-        This example selects those images that intersect a given bounding polygon.  The polygon is 
+        This example selects those images that intersect a given bounding polygon.  The polygon is
         specified as a Well Known Text LINESTRING with the first and last points being the same.
         The query says, select the footprint_latlon (the bounding polygons in the database) that
-        intersect the user provided polygon (the LINESTRING) in the given spatial reference system 
+        intersect the user provided polygon (the LINESTRING) in the given spatial reference system
         (SRID), 949900.
 
         "SELECT * FROM Images WHERE ST_INTERSECTS(footprint_latlon, ST_Polygon(ST_GeomFromText('LINESTRING(159 10, 159 11, 160 11, 160 10, 159 10)'),949900)) = TRUE"
 
         ## Select from a specific orbit
-        This example selects those images that are from a particular orbit. In this case, 
+        This example selects those images that are from a particular orbit. In this case,
         the regex string pulls all P##_* orbits and creates a graph from them. This method
         does not guarantee that the graph is fully connected.
 
         "SELECT * FROM Images WHERE (split_part(path, '/', 6) ~ 'P[0-9]+_.+') = True"
 
-        """ 
-        composite_query = """WITH 
+        """
+        composite_query = """WITH
 	i as ({})
 SELECT i1.id as i1_id,i1.path as i1_path, i2.id as i2_id, i2.path as i2_path
 FROM
 	i as i1, i as i2
 WHERE ST_INTERSECTS(i1.footprint_latlon, i2.footprint_latlon) = TRUE
 AND i1.id < i2.id""".format(query_string)
-        _, engine = new_connection()     
+        _, engine = new_connection()
         res = engine.execute(composite_query)
 
         adjacency = defaultdict(list)
         adjacency_lookup = {}
         for r in res:
             sid, spath, did, dpath = r
-            
+
             adjacency_lookup[spath] = sid
             adjacency_lookup[dpath] = did
             if spath != dpath:
@@ -558,7 +558,6 @@ class AsynchronousFailedWatcher(threading.Thread):
             # Remove the message from the work queue is it is expired.
             for msg in to_pop_and_resubmit:
                 callback_func = getattr(self.parent, msg['callback'])
-                self.queue.lrem(self.name,0, json.dumps(msg))      
+                self.queue.lrem(self.name,0, json.dumps(msg))
                 callback_func(msg)
-            
             

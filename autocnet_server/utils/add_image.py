@@ -3,11 +3,15 @@ import glob
 import json
 import os
 import socket
+import yaml
 
 from autocnet_server.cluster.slurm import spawn
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
+<<<<<<< HEAD
 from autocnet_server.db.connection import new_connection
 from autocnet_server import config
+=======
+>>>>>>> dd25bc9ce3d488b2e515e75b35c2a8b2e8f58714
 from geoalchemy2.elements import WKTElement
 
 from sqlalchemy import create_engine
@@ -18,9 +22,22 @@ from shapely.geometry import shape
 import Pyro4
 from threading import Thread
 
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
 class ImageAdder():
     def __init__(self):
+<<<<<<< HEAD
         db_uri, self._engine = new_connection()
+=======
+
+        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
+                                                                                   config['database']['database_password'],
+                                                                                   config['database']['database_host'],
+                                                                                   config['database']['database_port'],
+                                                                                   config['database']['database_name'])
+        self._engine = create_engine(db_uri)
+>>>>>>> dd25bc9ce3d488b2e515e75b35c2a8b2e8f58714
         self._connection = self._engine.connect()
         self._session = sessionmaker(bind=self._engine)()
         self._daemon = Pyro4.Daemon()
@@ -43,6 +60,7 @@ class ImageAdder():
                 return 'Image already processed'
 
         hostname = socket.gethostname()
+<<<<<<< HEAD
         callback_uri = 'PYRO:{}@{}:{}'.format(config['pyro']['image_adder_uri'],
                                                hostname,
                                                config['pyro']['image_adder_port'])
@@ -51,6 +69,17 @@ class ImageAdder():
         command = command.format(config['python']['pybin'], path, callback_uri)
         if config['cluster']['cluster_log_dir'] is not None:
             log_out = config['cluster']['cluster_log_dir'] + '/%j.log'
+=======
+
+        callback_uri = 'PYRO:{}@{}:{}'.format(config['pyro']['image_adder_uri'],
+                                                                       hostname,
+                                                                       config['pyro']['image_adder_port'])
+
+        command = '{} /home/acpaquette/repos/autocnet_server/bin/extract_features.py {} {}'
+        command = command.format(config['python']['pybin'], path, callback_uri)
+        if config['cluster']['cluster_log_dir'] is not None:
+            log_out = config['cluster']['cluster_log_dir']  + '/%j.log'
+>>>>>>> dd25bc9ce3d488b2e515e75b35c2a8b2e8f58714
         else:
             out = '%j.log'
 
