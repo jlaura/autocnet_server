@@ -8,7 +8,6 @@ import yaml
 from autocnet_server.cluster.slurm import spawn
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
 from autocnet_server.db.connection import new_connection
-from autocnet_server import config
 from geoalchemy2.elements import WKTElement
 
 from sqlalchemy import create_engine
@@ -73,7 +72,8 @@ class ImageAdder():
         passed to cluster.slurm.spawn.
 
         Parameters
-        ----------
+        ----------<<<<<<< HEAD
+
         path : string
                The directory containing images to be extracted
 
