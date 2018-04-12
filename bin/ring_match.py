@@ -182,13 +182,11 @@ if __name__ == '__main__':
     
     # Push the message to the processing queue with the updated max_time
     queue.lpush(config['redis']['working_queue'], json.dumps(msg))
-
     # Apply the matcher
     data, to_db = match(msg, args)
     
     # Write to the database if successful
     if data['success']:
         write_to_db(*to_db, msg)
-    
     # Alert the caller on failure to relaunch with next parameter set
     finalize(data, queue, omsg)

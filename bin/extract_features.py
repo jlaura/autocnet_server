@@ -33,6 +33,8 @@ if asp:
     sys.path.insert(0, asp)
 
 from plio.io.io_gdal import GeoDataset
+
+from plio.io.io_gdal import GeoDataset
 from autocnet.matcher.cuda_extractor import extract_features
 from autocnet.utils.utils import tile
 from autocnet.io.keypoints import to_hdf

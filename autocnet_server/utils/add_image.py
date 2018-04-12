@@ -7,6 +7,7 @@ import yaml
 
 from autocnet_server.cluster.slurm import spawn
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
+from autocnet_server.db.connection import new_connection
 from geoalchemy2.elements import WKTElement
 
 from sqlalchemy import create_engine
@@ -22,13 +23,7 @@ with open(os.environ['autocnet_config'], 'r') as f:
 
 class ImageAdder():
     def __init__(self):
-
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
-                                                                                   config['database']['database_password'],
-                                                                                   config['database']['database_host'],
-                                                                                   config['database']['database_port'],
-                                                                                   config['database']['database_name'])
-        self._engine = create_engine(db_uri)
+        db_uri, self._engine = new_connection()
         self._connection = self._engine.connect()
         self._session = sessionmaker(bind=self._engine)()
         self._daemon = Pyro4.Daemon()
@@ -51,15 +46,14 @@ class ImageAdder():
                 return 'Image already processed'
 
         hostname = socket.gethostname()
-
         callback_uri = 'PYRO:{}@{}:{}'.format(config['pyro']['image_adder_uri'],
-                                                                       hostname,
-                                                                       config['pyro']['image_adder_port'])
+                                               hostname,
+                                               config['pyro']['image_adder_port'])
 
-        command = '{} /home/acpaquette/repos/autocnet_server/bin/extract_features.py {} {}'
+        command = '{} /home/jlaura/autocnet_server/bin/extract_features.py {} {}'
         command = command.format(config['python']['pybin'], path, callback_uri)
         if config['cluster']['cluster_log_dir'] is not None:
-            log_out = config['cluster']['cluster_log_dir']  + '/%j.log'
+            log_out = config['cluster']['cluster_log_dir'] + '/%j.log'
         else:
             out = '%j.log'
 
@@ -78,7 +72,8 @@ class ImageAdder():
         passed to cluster.slurm.spawn.
 
         Parameters
-        ----------
+        ----------<<<<<<< HEAD
+
         path : string
                The directory containing images to be extracted
 

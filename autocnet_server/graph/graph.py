@@ -10,10 +10,12 @@ import threading
 
 from sqlalchemy.orm import aliased, create_session, scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
-from sqlalchemy import create_engine
-from geoalchemy2.shape import to_shape
-from geoalchemy2.elements import WKTElement
+from sqlalchemy import create_engine, func
+
+from geoalchemy2.shape import to_shape, from_shape
+from geoalchemy2.elements import WKTElement, WKBElement
 from shapely.geometry import Point
+import shapely
 
 import numpy as np
 import pandas as pd
@@ -143,7 +145,7 @@ class NetworkNode(node.Node):
         Using the image footprint, generate a VRT to that is usable inside
         of a GIS (QGIS or ArcGIS) to visualize a warped version of this image.
         """
-        outpath = self.parent.config['directories']['vrt_dir']
+        outpath = config['directories']['vrt_dir']
         generate_vrt.warped_vrt(self.camera, self.geodata.raster_size,
                                 self.geodata.file_name, outpath=outpath)
     #def _clean(self):
@@ -321,6 +323,41 @@ class NetworkCandidateGraph(network.CandidateGraph):
         for i, n in self.nodes(data='data'):
             n.generate_vrt(**kwargs)
 
+    def compute_overlaps(self):
+        query = """
+    SELECT ST_AsEWKB(geom) AS geom FROM ST_Dump((
+        SELECT ST_Polygonize(the_geom) AS the_geom FROM (
+            SELECT ST_Union(the_geom) AS the_geom FROM (
+                SELECT ST_ExteriorRing(footprint_latlon) AS the_geom
+                FROM images) AS lines
+        ) AS noded_lines
+    )
+)"""
+        oquery = self.session.query(Overlay)
+        iquery = self.session.query(Images)
+
+        rows = []
+        for q in self._engine.execute(query).fetchall():
+            overlaps = []
+            b = bytes(q['geom']) 
+            qgeom = shapely.wkb.loads(b)
+            res = iquery.filter(Images.footprint_latlon.ST_Intersects(from_shape(qgeom, srid=949900)))
+            for i in res:
+                fgeom = to_shape(i.footprint_latlon)
+                area = qgeom.intersection(fgeom).area
+                if area < 1e-6:
+                    continue
+                overlaps.append(i.id)
+            o = Overlay(geom='SRID=949900;{}'.format(qgeom.wkt), overlaps=overlaps)
+        
+            rows.append(o)
+        self.session.bulk_save_objects(rows)
+        self.session.commit()
+
+        res = oquery.filter(func.cardinality(Overlay.overlaps) <= 1)
+        res.delete(synchronize_session=False)
+        self.session.commit()
+
     def ring_match(self, edges=[], walltime='01:00:00'):
         t = time.time()
         if edges:
@@ -368,7 +405,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 parameters = config['algorithms']['ring_match'][current_param_step]
                 rm['target_points'] = parameters['target_points']
                 rm['tolerance'] = parameters['tolerance']
-
+                rm['time'] = time.time()
                 # Respawn the job using the normal slurm method
                 self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(rm))
                 # This hard coded command is poor form in that this is making the ring_matcher
@@ -377,7 +414,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 # the threshold tolerance or the number of required 'good' points
                 cmd = '{} /home/acpaquette/repos/autocnet_server/bin/ring_match.py'.format(config['python']['pybin'])
                 spawn(cmd, mem=config['cluster']['processing_memory'],
-                      time=rm['time'], queue=config['cluster']['queue'])
+                      time=msg['walltime'], queue=config['cluster']['queue'])
 
     def create_network(self, nodes=[]):
         cmds = 0
@@ -401,7 +438,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                     queue=config['cluster']['queue'])
 
     @classmethod
-    def from_database(cls, query_string='SELECT * FROM Images'):
+    def from_database(cls, query_string='SELECT * FROM public.Images'):
         """
         This is a constructor that takes the results from an arbitrary query string,
         uses those as a subquery into a standard polygon overlap query and
@@ -523,3 +560,4 @@ class AsynchronousFailedWatcher(threading.Thread):
                 callback_func = getattr(self.parent, msg['callback'])
                 self.queue.lrem(self.name,0, json.dumps(msg))
                 callback_func(msg)
+            
