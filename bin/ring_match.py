@@ -56,6 +56,8 @@ def match(msg, args):
     sfile = session.query(Keypoints).filter(Keypoints.image_id == source_id).first().path
     dfile = session.query(Keypoints).filter(Keypoints.image_id == destin_id).first().path
     camera = pickle.loads(session.query(Cameras).filter(Cameras.image_id == source_id).first().camera)
+    simgfile = session.query(Images).filter(Images.id == source_id).first().path
+    dimgfile = session.query(Images).filter(Images.id == destin_id).first().path
     session.close()
 
     # Grab the reference and target keypoints
@@ -65,6 +67,7 @@ def match(msg, args):
     # Default message
     data = {'success':False,
             'sidx': msg['sidx'], 'didx': msg['didx'],
+            'count':msg['count'],
             'callback':'ring_matcher_callback'}
 
     ref_feats = ref_kps[['x', 'y', 'xm', 'ym', 'zm']].values
@@ -78,7 +81,8 @@ def match(msg, args):
                                   target_points=target_points,
                                   tolerance_val=tolerance)
 
-
+    # Insert the subpixel matcher here
+    # If the total number of correspondences < target_points, keep on keeping on.
     if pidx is None:
         print('Unable to find a solution.')
         return data
@@ -139,7 +143,7 @@ def finalize(data, queue, msg):
     queue.rpush(config['redis']['completed_queue'], json.dumps(data))
 
     # Now that work is done, clean out the 'working queue'
-    queue.lrem(config['redis']['working_queue'], 0, json.dumps(msg))
+    queue.lrem(config['redis']['working_queue'], 0, msg)
 
 def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
     
@@ -176,12 +180,13 @@ if __name__ == '__main__':
     args = parse_args()
     queue = StrictRedis( host="smalls", port=8000, db=0)
     # Load the message out of the processing queue and add a max processing time key
+    
     msg = json.loads(queue.rpop(config['redis']['processing_queue']))
-    omsg = copy.copy(msg)
     msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
+    working_queue_msg = json.dumps(copy.copy(msg))
     
     # Push the message to the processing queue with the updated max_time
-    queue.lpush(config['redis']['working_queue'], json.dumps(msg))
+    queue.rpush(config['redis']['working_queue'], working_queue_msg)
     # Apply the matcher
     data, to_db = match(msg, args)
     
@@ -189,4 +194,4 @@ if __name__ == '__main__':
     if data['success']:
         write_to_db(*to_db, msg)
     # Alert the caller on failure to relaunch with next parameter set
-    finalize(data, queue, omsg)
+    finalize(data, queue, working_queue_msg)
