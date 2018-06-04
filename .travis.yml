@@ -42,7 +42,7 @@ before_install:
   - conda config --set ssl_verify false
   - conda install conda-build anaconda-client
   - conda config --set anaconda_upload yes
-  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION conda
+  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION recipe
   # - conda install -c conda-forge vlfeat cyvlfeat plio scipy networkx numexpr cython matplotlib pillow runipy geopandas opencv numpy gdal autocnet-dev
 
   # Development installation
