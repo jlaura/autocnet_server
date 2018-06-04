@@ -1,6 +1,11 @@
 import os
+import warnings
 import yaml
 
 #Load the config file
-with open(os.environ['autocnet_config'], 'r') as f:
+try:
+    with open(os.environ['autocnet_config'], 'r') as f:
         config = yaml.load(f)
+except:
+    warning.warn('No autocnet_config environment variable set. Defaulting to an en empty configuration.')
+    config = {}
