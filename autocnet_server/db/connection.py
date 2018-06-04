@@ -1,17 +1,10 @@
 from contextlib import contextmanager
-import os
 
 import sqlalchemy
 from sqlalchemy import create_engine
 from sqlalchemy.orm import create_session, scoped_session, sessionmaker
 
-import yaml
-
-#Load the config file
-with open(os.environ['autocnet_config'], 'r') as f:
-        config = yaml.load(f)
-
-def new_connection():
+def new_connection(config):
     """
     Using the user supplied config create a NullPool database connection.
 
