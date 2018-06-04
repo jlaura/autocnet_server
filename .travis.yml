@@ -32,15 +32,18 @@ before_install:
   # Useful for debugging any issues with conda
   - conda info -a
   # Create the env
-  - conda create -q -n test python=$PYTHON_VERSION
-  - source activate test
+  # - conda create -q -n test python=$PYTHON_VERSION
+  # - source activate test
 
   # Install dependencies
   - conda config --add channels conda-forge
   - conda config --add channels menpo
   - conda config --add channels usgs-astrogeology
   - conda config --set ssl_verify false
-  - conda install -c conda-forge vlfeat cyvlfeat plio scipy networkx numexpr cython matplotlib pillow runipy geopandas opencv numpy gdal autocnet-dev
+  - conda install conda-build anaconda-client
+  - conda config --set anaconda_upload yes
+  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION conda
+  # - conda install -c conda-forge vlfeat cyvlfeat plio scipy networkx numexpr cython matplotlib pillow runipy geopandas opencv numpy gdal autocnet-dev
 
   # Development installation
   # - conda install pytest pytest-cov coverage sh anaconda-client
@@ -52,10 +55,9 @@ script:
 after_success:
   # - coveralls
   # Need to do the build in the root
-  - source deactivate
-  - conda install conda-build anaconda-client
-  - conda config --set anaconda_upload yes
-  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION conda
+  # - source deactivate
+
+  
 
 notifications:
   webhooks:
