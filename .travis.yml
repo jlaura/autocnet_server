@@ -42,7 +42,6 @@ before_install:
   - conda config --set ssl_verify false
   - conda install conda-build anaconda-client
   - conda config --set anaconda_upload yes
-  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION recipe
   # - conda install -c conda-forge vlfeat cyvlfeat plio scipy networkx numexpr cython matplotlib pillow runipy geopandas opencv numpy gdal autocnet-dev
 
   # Development installation
@@ -50,14 +49,9 @@ before_install:
   # - pip install coveralls
 
 script:
+  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION recipe -q
   # - pytest autocnet tests
 
-after_success:
-  # - coveralls
-  # Need to do the build in the root
-  # - source deactivate
-
-  
 
 notifications:
   webhooks:
