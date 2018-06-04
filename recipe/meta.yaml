@@ -8,37 +8,9 @@ source:
 requirements:
   build:
     - python
-    - vlfeat
-    - cyvlfeat
-    - pillow
-    - scipy
-    - networkx
-    - numexpr
-    - cython
-    - matplotlib
-    - geopandas
-    - opencv3
-    - numpy
-    - plio
-    - gdal
     - autocnet-dev
+    - redis
   run:
     - python
-    - vlfeat
-    - cyvlfeat
-    - pillow
-    - scipy
-    - networkx
-    - numexpr
-    - cython
-    - matplotlib
-    - geopandas
-    - opencv3
-    - numpy
-    - plio
-    - gdal
     - autocnet-dev
-
-test:
-  imports:
-    - autocnet_server
+    - redis
