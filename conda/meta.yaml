@@ -38,7 +38,3 @@ requirements:
     - plio
     - gdal
     - autocnet-dev
-
-test:
-  imports:
-    - autocnet_server
