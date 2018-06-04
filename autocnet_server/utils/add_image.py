@@ -23,7 +23,7 @@ with open(os.environ['autocnet_config'], 'r') as f:
 
 class ImageAdder():
     def __init__(self):
-        db_uri, self._engine = new_connection()
+        db_uri, self._engine = new_connection(config)
         self._connection = self._engine.connect()
         self._session = sessionmaker(bind=self._engine)()
         self._daemon = Pyro4.Daemon()
@@ -58,7 +58,7 @@ class ImageAdder():
             out = '%j.log'
 
         # Spawn the job and update the submission tracker
-        res = spawn(command, name='AC_Extract', out=log_out, mem=config['cluster']['extractor_memory'])
+        res = spawn(command, name='AC_Extract', outdir=log_out, mem=config['cluster']['extractor_memory'])
         self.job_status[path]['submission'] = res
         self.job_status[path]['count'] = 0
 
@@ -72,7 +72,7 @@ class ImageAdder():
         passed to cluster.slurm.spawn.
 
         Parameters
-        ----------<<<<<<< HEAD
+        ----------
 
         path : string
                The directory containing images to be extracted
