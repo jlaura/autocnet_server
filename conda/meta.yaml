@@ -21,7 +21,7 @@ requirements:
     - numpy
     - plio
     - gdal
-    - autocnet
+    - autocnet-dev
   run:
     - python
     - vlfeat
@@ -37,7 +37,7 @@ requirements:
     - numpy
     - plio
     - gdal
-    - autocnet
+    - autocnet-dev
 
 test:
   imports:
