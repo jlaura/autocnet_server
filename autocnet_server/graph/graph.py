@@ -389,7 +389,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 msg['callback'] = 'compute_fundamental_callback'
                 self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))   
         job_counter += 1
-        script = 'estimate_fundamental'
+        script = 'acn_estimate_fundamental'
         spawn_jobarr(config['python']['pybin'], script,job_counter,
                      mem=config['cluster']['processing_memory'],
                      time=walltime, queue=config['cluster']['queue'],
@@ -415,7 +415,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
         job_counter += 1 # Slurm counter is 1 based.
         # TODO: This should not be hard coded, but pulled from the install location
-        script = 'ring_match'
+        script = 'acn_ring_match'
         spawn_jobarr(config['python']['pybin'], script,job_counter,
                      mem=config['cluster']['processing_memory'],
                      time=walltime, queue=config['cluster']['queue'],
@@ -504,7 +504,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
             else:
                 self.redis_queue.rpush(config['redis']['processing_queue'], msg)
                 cmds += 1
-        script = 'create_network'
+        script = 'acn_create_network'
         spawn_jobarr(config['python']['pybin'], script, cmds,
                     mem=config['cluster']['processing_memory'],
                     queue=config['cluster']['queue'])
