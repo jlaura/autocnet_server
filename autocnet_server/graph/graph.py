@@ -11,6 +11,7 @@ import threading
 from sqlalchemy.orm import aliased, create_session, scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy import create_engine, func
+from sqlalchemy.dialects.postgresql import insert
 
 from geoalchemy2.shape import to_shape, from_shape
 from geoalchemy2.elements import WKTElement, WKBElement
@@ -218,6 +219,19 @@ class NetworkEdge(edge.Edge):
         node = getattr(self, node)
         return self.get_keypoints(node, index=index, homogeneous=homogeneous, overlap=overlap)
 
+    def compute_fundamental_matrix(self):
+        if len(self.job_status['fundamental_matrix']) == 0:
+            parameters = config['algorithms']['fundamental_matrix'][0]
+            default_msg = {'sidx':self.source['node_id'],
+                            'didx':self.destination['node_id'],
+                            'time':'',
+                            'task':'compute_fundamental',
+                            'param_step':0,
+                            'count':0,
+                            'success':False}
+            self.job_status['fundamental_matrix'] = {**default_msg, **parameters}
+        return self.job_status['fundamental_matrix']
+
     def ring_match(self):
         if len(self.job_status['ring_match']) == 0:
             parameters = config['algorithms']['ring_match'][0]
@@ -349,14 +363,39 @@ class NetworkCandidateGraph(network.CandidateGraph):
                     continue
                 overlaps.append(i.id)
             o = Overlay(geom='SRID=949900;{}'.format(qgeom.wkt), overlaps=overlaps)
+            res = oquery.filter(Overlay.overlaps == o.overlaps).first()
+            if res is None:
+                rows.append(o)
         
-            rows.append(o)
         self.session.bulk_save_objects(rows)
         self.session.commit()
 
         res = oquery.filter(func.cardinality(Overlay.overlaps) <= 1)
         res.delete(synchronize_session=False)
         self.session.commit()
+
+    def compute_fundamental_matrices(self, edges=[], walltime='00:10:00'):
+        t = time.time()
+        if edges:
+            for job_counter, e in enumerate(edges):
+                msg = self.edges[e]['data'].compute_fundamental_matrix()
+                msg['walltime'] = walltime
+                msg['callback'] = 'compute_fundamental_callback'
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
+        else:
+            for job_counter, (s, d, e) in enumerate(self.edges(data='data')):
+                msg = e.compute_fundamental_matrix()
+                msg['walltime'] = walltime
+                msg['callback'] = 'compute_fundamental_callback'
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))   
+        job_counter += 1
+        script = 'estimate_fundamental'
+        spawn_jobarr(config['python']['pybin'], script,job_counter,
+                     mem=config['cluster']['processing_memory'],
+                     time=walltime, queue=config['cluster']['queue'],
+                     outdir=config['cluster']['cluster_log_dir']+'/slurm-%A_%a.out')
+
+        return job_counter
 
     def ring_match(self, edges=[], walltime='01:00:00'):
         t = time.time()
@@ -376,13 +415,44 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
         job_counter += 1 # Slurm counter is 1 based.
         # TODO: This should not be hard coded, but pulled from the install location
-        script = '/home/acpaquette/repos/autocnet_server/bin/ring_match.py'
+        script = 'ring_match'
         spawn_jobarr(config['python']['pybin'], script,job_counter,
                      mem=config['cluster']['processing_memory'],
-                     time=walltime, queue=config['cluster']['queue'])
+                     time=walltime, queue=config['cluster']['queue'],
+                     outdir=config['cluster']['cluster_log_dir']+'/slurm-%A_%a.out')
 
         return job_counter
 
+    def compute_fundamental_callback(self, msg):
+        source = msg['sidx']
+        destination = msg['didx']
+        e = self.edges[source, destination]['data']
+        js = e.job_status['fundamental_matrix']
+        if msg['success'] == True:
+            js['success'] = True
+        else:
+            if js['count'] <= config['cluster']['maxfailures']:
+                js['count'] += 1
+                js['param_step'] += 1
+                if js['param_step'] >= len(config['algorithms']['fundamental_matrix']):
+                    return
+                # Increment the parameter space defined in the config
+                current_param_step = js['param_step']
+                parameters = config['algorithms']['fundamental_matrix'][current_param_step]
+                for k, v in parameters.items():
+                    js[k] = v
+                # Reset the submission time
+                js['time'] = time.time()
+                # Respawn the job using the normal slurm method
+                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(js))
+                # This hard coded command is poor form in that this is making the ring_matcher
+                # now parameterize differently, what we want to do here is think about adding
+                # some devision making to the system - if matching well fails, reduce either
+                # the threshold tolerance or the number of required 'good' points
+                cmd = '{} estimate_fundamental'.format(config['python']['pybin'])
+                spawn(cmd, mem=config['cluster']['processing_memory'],
+                      time=msg['walltime'], queue=config['cluster']['queue'], 
+                      outdir=config['cluster']['cluster_log_dir']+'/slurm-%j.out')
 
     def ring_matcher_callback(self, msg):
         source = msg['sidx']
@@ -394,6 +464,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         if msg['success']:
             rm['success'] = True
         else:
+            print(rm)
             if rm['count'] <= config['cluster']['maxfailures']:
                 rm['count'] += 1
                 rm['param_step'] += 1
@@ -412,9 +483,10 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 # now parameterize differently, what we want to do here is think about adding
                 # some devision making to the system - if matching well fails, reduce either
                 # the threshold tolerance or the number of required 'good' points
-                cmd = '{} /home/acpaquette/repos/autocnet_server/bin/ring_match.py'.format(config['python']['pybin'])
+                cmd = '{} ring_match'.format(config['python']['pybin'])
                 spawn(cmd, mem=config['cluster']['processing_memory'],
-                      time=msg['walltime'], queue=config['cluster']['queue'])
+                      time=msg['walltime'], queue=config['cluster']['queue'],
+                      out=config['cluster']['cluster_log_dir']+'/slurm-%j.out')
 
     def create_network(self, nodes=[]):
         cmds = 0
@@ -432,7 +504,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
             else:
                 self.redis_queue.rpush(config['redis']['processing_queue'], msg)
                 cmds += 1
-        script = '/home/acpaquette/repos/autocnet_server/bin/create_network.py'
+        script = 'create_network'
         spawn_jobarr(config['python']['pybin'], script, cmds,
                     mem=config['cluster']['processing_memory'],
                     queue=config['cluster']['queue'])
@@ -478,7 +550,7 @@ FROM
 	i as i1, i as i2
 WHERE ST_INTERSECTS(i1.footprint_latlon, i2.footprint_latlon) = TRUE
 AND i1.id < i2.id""".format(query_string)
-        _, engine = new_connection()
+        _, engine = new_connection(config)
         res = engine.execute(composite_query)
 
         adjacency = defaultdict(list)

@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+
+import copy
+import os
+import json
+import sys
+import time
+
+import numpy as np
+from redis import StrictRedis
+from skimage.feature import register_translation
+import yaml
+
+
+#Load the config file
+with open(os.environ['autocnet_config'], 'r') as f:
+    config = yaml.load(f)
+
+# Patch in dev. versions if requested.
+acp = config.get('developer', {}).get('autocnet_path', None)
+if acp:
+    sys.path.insert(0, acp)
+
+asp = config.get('developer', {}).get('autocnet_server_path', None)
+if asp:
+    sys.path.insert(0, asp)
+
+pl = config.get('developer', {}).get('plio_path', None)
+if pl:
+    print(pl)
+    sys.path.insert(0, pl)
+
+from plio.io.io_gdal import GeoDataset
+
+from autocnet_server.camera.csm_camera import ecef_to_latlon
+from autocnet_server.db import connection
+from autocnet_server.db.model import  Keypoints, Matches, Edges, Images
+from autocnet_server.utils.utils import slurm_walltime_to_seconds
+
+from autocnet.utils.utils import get_size, getsubarr, correlation_coefficient
+from autocnet.matcher.cpu_ring_matcher import ring_match, add_correspondences
+from autocnet.transformation.fundamental_matrix import compute_fundamental_matrix
+
+
+def main(msg):
+    print(msg)
+    source_id = msg['sidx']
+    destin_id = msg['didx']
+
+    tolerance = msg['tolerance']
+    reproj_threshold = msg['reproj_threshold']
+    initial_x_size = msg['initial_x_size']
+    initial_y_size = msg['initial_y_size']
+    corr_x_size = msg['corr_x_size']
+    corr_y_size = msg['corr_y_size']
+
+    # Get the homogeneous keypoints and the image file paths
+    print('Processing Edge: ({},{})'.format(source_id, destin_id))
+    session, _ = connection.new_connection(config)
+    res = session.query(Matches).filter(Matches.source == source_id,
+                                            Matches.destination == destin_id).all()
+    nmatches = len(res)
+    spts = np.empty((nmatches, 2))
+    dpts = np.empty((nmatches, 2))
+    for i in range(nmatches):
+        spts[i] = res[i].source_x, res[i].source_y
+        dpts[i] = res[i].destination_x, res[i].destination_y
+
+    simgfile = session.query(Images).filter(Images.id == source_id).first().path
+    dimgfile = session.query(Images).filter(Images.id == destin_id).first().path
+    session.close()
+
+    source_geodata = GeoDataset(simgfile)
+    destin_geodata = GeoDataset(dimgfile)
+
+    # Subpixel register the dpts to the spts and flag misregistrations
+    good = [] # good indices
+    for i in range(nmatches):
+        rpt = spts[i]
+        tpt = dpts[i]
+        xsize = initial_x_size
+        ysize = initial_y_size
+
+        # check to ensure that the ssub and dsub can be within in the image extent
+        xsize, ysize = get_size(rpt[0], rpt[1], tpt[0], tpt[1], xsize, ysize,
+                                source_geodata.raster_size,
+                                destin_geodata.raster_size)
+        ssub, axr, ayr = getsubarr(rpt[0], rpt[1], source_geodata, xsize=xsize, ysize=ysize)
+        dsub, dxr, dyr = getsubarr(tpt[0], tpt[1], destin_geodata, xsize=xsize, ysize=ysize)
+        (y_shift, x_shift), error, diffphase = register_translation(ssub, dsub,
+                            upsample_factor=100,
+                            space='real')  
+
+        # Compute the NCC of sub-images centered on the new pt
+        ntpt = [tpt[0] - x_shift + dxr, tpt[1] - y_shift + dyr]
+        cxs,  cys = get_size(rpt[0], rpt[1], ntpt[0], ntpt[1],
+                                             corr_x_size,  corr_y_size, 
+                                             source_geodata.raster_size,
+                                             destin_geodata.raster_size)
+        stiny, _, _ = getsubarr(rpt[0], rpt[1], source_geodata, xsize=cxs, ysize= cys)
+        dtiny, _, _ = getsubarr(ntpt[0], ntpt[1], destin_geodata, xsize=cxs, ysize= cys)
+        cc = correlation_coefficient(stiny, dtiny)
+        if cc >= tolerance:
+            dpts[i] = ntpt
+            good.append(i)
+    subpixel_source = spts[good]
+    subpixel_destin = dpts[good]
+
+    F, mask = compute_fundamental_matrix(subpixel_source, subpixel_destin,
+                                         reproj_threshold=reproj_threshold,
+                                         method='ransac')
+
+    # Default message
+    data = {'success':False,
+            'sidx': msg['sidx'], 'didx': msg['didx'],
+            'count':msg['count'],
+            'walltime':msg['walltime'],
+            'callback':'compute_fundamental_callback'}
+
+    if F is not None:
+        data['success'] = True
+       
+
+    return data, (source_id, destin_id, F)
+
+def write_to_db(sourceid, destinid, fmatrix, msg):
+    session, _ = connection.new_connection(config)
+    session.begin()
+    edge = session.query(Edges).filter(Edges.source == sourceid, Edges.destination == destinid).first()
+    setattr(edge, 'fundamental', fmatrix)
+    session.commit()
+    session.close()
+
+def finalize(data, queue, msg):
+
+    for k, v in data.items():
+        if isinstance(v, np.ndarray):
+            data[k] = v.tolist()
+
+    queue.rpush(config['redis']['completed_queue'], json.dumps(data))
+    # Now that work is done, clean out the 'working queue'
+    queue.lrem(config['redis']['working_queue'], 0, msg)
+
+if __name__ == '__main__':
+    queue = StrictRedis( host="smalls", port=8000, db=0)
+    # Load the message out of the processing queue and add a max processing time key
+    
+    msg = json.loads(queue.rpop(config['redis']['processing_queue']))
+    msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
+    working_queue_msg = json.dumps(copy.copy(msg))
+    
+    # Push the message to the processing queue with the updated max_time
+    queue.rpush(config['redis']['working_queue'], working_queue_msg)
+    
+    # Apply main
+    data, to_db = main(msg)
+    
+    # Write to the database if successful
+    if data['success']:
+        write_to_db(*to_db, msg)
+    # Alert the caller on failure to relaunch with next parameter set
+    finalize(data, queue, working_queue_msg)

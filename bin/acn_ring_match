@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import copy
 import json
@@ -42,6 +44,21 @@ def parse_args():
     parser.add_argument('-m', '--maxradius', default=1200)
     return parser.parse_args()
 
+def check_pidx_duplicates(pidx):
+    # Check for duplicates
+    l = pidx[:,1].tolist()
+    clean = [i for i, x in enumerate(l) if l.count(x) == 1]
+    if len(clean) < len(pidx):
+        print('Col1: ', pidx)
+    pidx = pidx[clean, :]
+
+    l = pidx[:,0].tolist()
+    clean = [i for i, x in enumerate(l) if l.count(x) == 1]
+    if len(clean) < len(pidx):
+        print('Col0 ', pidx)
+    pidx = pidx[clean, :]
+    return pidx
+
 def match(msg, args):
 
     # Get the s/d ids from the message queue and then grab the paths from the
@@ -52,12 +69,10 @@ def match(msg, args):
     tolerance = msg['tolerance']
 
     print('Processing Edge: ({},{})'.format(source_id, destin_id))
-    session, _ = connection.new_connection()
+    session, _ = connection.new_connection(config)
     sfile = session.query(Keypoints).filter(Keypoints.image_id == source_id).first().path
     dfile = session.query(Keypoints).filter(Keypoints.image_id == destin_id).first().path
     camera = pickle.loads(session.query(Cameras).filter(Cameras.image_id == source_id).first().camera)
-    simgfile = session.query(Images).filter(Images.id == source_id).first().path
-    dimgfile = session.query(Images).filter(Images.id == destin_id).first().path
     session.close()
 
     # Grab the reference and target keypoints
@@ -73,19 +88,28 @@ def match(msg, args):
     ref_feats = ref_kps[['x', 'y', 'xm', 'ym', 'zm']].values
     tar_feats = tar_kps[['x', 'y', 'xm', 'ym', 'zm']].values
 
-    # Ring Match
-    _, _, pidx, ring = ring_match(ref_feats, tar_feats,
-                                  ref_desc, tar_desc,
-                                  ring_radius=args.ringradius,
-                                  max_radius=args.maxradius,
-                                  target_points=target_points,
-                                  tolerance_val=tolerance)
+    while True:
+        # Ring Match
+        _, _, pidx, ring = ring_match(ref_feats, tar_feats,
+                                    ref_desc, tar_desc,
+                                    ring_radius=args.ringradius,
+                                    max_radius=args.maxradius,
+                                    target_points=target_points,
+                                    tolerance_val=tolerance)
+        # Insert the subpixel matcher here
+        rmse = np.ones(pidx.shape[0])
+        pidx = check_pidx_duplicates(pidx)
+        for row in pidx:
+            rid = row[0]
+            tid = row[1]
 
-    # Insert the subpixel matcher here
-    # If the total number of correspondences < target_points, keep on keeping on.
-    if pidx is None:
-        print('Unable to find a solution.')
-        return data
+            
+
+        if pidx is None:
+            print('Unable to find a solution.')
+            return data
+        elif pidx.shape[0] >= target_points:
+            break
 
     # Now densify the matches if a ring has been found
     print('Initial Pass Resulted in {} matches'.format(len(pidx)))
@@ -117,18 +141,7 @@ def match(msg, args):
     else:
         print('no additional references to add')
     
-    # Check for duplicates
-    l = pidx[:,1].tolist()
-    clean = [i for i, x in enumerate(l) if l.count(x) == 1]
-    if len(clean) < len(pidx):
-        print('Col1: ', pidx)
-    pidx = pidx[clean, :]
-
-    l = pidx[:,0].tolist()
-    clean = [i for i, x in enumerate(l) if l.count(x) == 1]
-    if len(clean) < len(pidx):
-        print('Col0 ', pidx)
-    pidx = pidx[clean, :]
+    pidx = check_pidx_duplicates(pidx)
 
     # Package the data to round trip to the server
     data['success'] = True
@@ -169,7 +182,7 @@ def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
     
     e = Edges(source=msg['sidx'], destination=msg['didx'], ring=ring)
 
-    session, _ = connection.new_connection()
+    session, _ = connection.new_connection(config)
     session.begin()
     session.bulk_save_objects(to_add)
     session.add(e)

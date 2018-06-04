@@ -1,0 +1,8 @@
+#!/bin/bash -l
+#SBATCH -n 1
+#SBATCH --mem-per-cpu 64000
+#SBATCH -J virtual_mosaic
+#SBATCH -t 24:00:00
+#SBATCH -p research
+/home/jlaura/anaconda3/envs/ct/bin/gdalbuildvrt /scratch/jlaura/ctx/all_controlled.vrt /scratch/jlaura/ctx/controlled/*.vrt -a_srs "+proj=longlat +a=3396190 +b=3376200 +no_defs"
+/home/jlaura/anaconda3/envs/ct/bin/gdaladdo -ro --config GDAL_CACHEMAX 24576 --config BIGTIFF_OVERVIEW YES --config COMPRESS_OVERVIEW DEFLATE --config NUM_THREADS 8 /scratch/jlaura/ctx/all_controlled.vrt 4 8 16 32 64 128

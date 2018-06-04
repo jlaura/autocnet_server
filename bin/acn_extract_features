@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import os
 import pickle
@@ -193,9 +195,11 @@ if __name__ == '__main__':
             time.sleep(30)
             maxretries -= 1
     if session:
+        try:
             session.add(img)
             session.commit()
-            session.close()
-            # Send the success signal to the listener
             data = {'success':True,'path':input_file}
+        except:
+            session.rollback()
+            session.close()
     finalize(data, kwargs['callback_uri'])

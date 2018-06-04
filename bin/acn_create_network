@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 from itertools import combinations
 import json
@@ -225,6 +227,9 @@ def main(msg):
 
         x1 = make_homogeneous(x1[['x', 'y']].values)
         x2 = make_homogeneous(x2[['x', 'y']].values)
+
+        # Need to add the subpixel matcher here to get these points into the right place.
+        # Then F will be much tighter
         f, fmask = compute_fundamental_matrix(x1, x2, method='ransac', reproj_threshold=20)
         fundamentals[e] = f
         match['strength'] = compute_reprojection_error(f, x1, x2)
@@ -253,6 +258,8 @@ def main(msg):
     # Push the points through
     pts = deepen(subset, fundamentals, overlaps, oid)
 
+    # Need to add the subpixel here as well
+
     return pts
 
 def finalize(data, queue):
@@ -272,7 +279,7 @@ def write_to_db(pts):
                     point_id = p.get('point_id', None),
                     geom = p['geom'])
         to_add.append(n)
-    session = new_connection()
+    session = new_connection(config)
     session.begin()
     session.bulk_save_objects(to_add)
     session.commit()
