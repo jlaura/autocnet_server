@@ -1,5 +1,5 @@
 package:
-  name: autocnet_server
+  name: autocnet-server
   version: 0.1.0
 
 source:
