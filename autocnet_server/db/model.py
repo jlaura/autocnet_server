@@ -1,7 +1,7 @@
 import json
 
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, String, Integer, Float, ForeignKey, Boolean, LargeBinary
+from sqlalchemy import Column, String, Integer, Float, ForeignKey, Boolean, LargeBinary, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship, backref
 from geoalchemy2 import Geometry
@@ -77,7 +77,7 @@ class Matches(Base):
 class Cameras(Base):
     __tablename__ = 'cameras'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    image_id = Column(Integer, ForeignKey("images.id", ondelete="CASCADE"))
+    image_id = Column(Integer, ForeignKey("images.id", ondelete="CASCADE"), unique=True)
     camera = Column(LargeBinary)
 
 
@@ -85,8 +85,8 @@ class Images(Base):
     __tablename__ = 'images'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String)
-    path = Column(String)
+    name = Column(String, unique=True)
+    path = Column(String, unique=True)
     active = Column(Boolean)
     footprint_latlon = Column(Geometry('POLYGONZ', srid=949900, dimension=3, spatial_index=True))
     footprint_bodyfixed = Column(Geometry('POLYGONZ', dimension=3))
@@ -123,4 +123,4 @@ class Overlay(Base):
     __tablename__ = 'overlay'
     id = Column(Integer, primary_key=True, autoincrement=True)
     geom = Column(Geometry('POLYGONZ', srid=949900, dimension=3, spatial_index=True))
-    overlaps = Column(ARRAY(Integer))
+    overlaps = Column(ARRAY(Integer), unique=True)
