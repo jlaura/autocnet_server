@@ -9,5 +9,5 @@ setup(
     package_requires=[],
     scripts=['bin/acn_create_network', 'bin/acn_estimate_fundamental',
              'bin/acn_extract_features', 'bin/acn_generate_mosaic',
-             'acn_ring_mathc']
+             'bin/acn_ring_match']
 )
