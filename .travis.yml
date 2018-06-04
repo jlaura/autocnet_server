@@ -56,7 +56,6 @@ after_success:
   # Need to do the build in the root
   # - source deactivate
   - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION recipe -q
-  
 
 notifications:
   webhooks:
