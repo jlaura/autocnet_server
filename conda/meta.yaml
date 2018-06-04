@@ -3,8 +3,8 @@ package:
   version: 0.1.0
 
 source:
-   #git_url: https://github.com/USGS-Astrogeology/autocnet.git
-   path: ../
+   git_url: https://github.com/USGS-Astrogeology/autocnet_server.git
+   
 requirements:
   build:
     - python
@@ -38,3 +38,7 @@ requirements:
     - plio
     - gdal
     - autocnet-dev
+
+test:
+  imports:
+    - autocnet_server
