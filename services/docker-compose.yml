@@ -6,29 +6,50 @@ services:
       POSTGRES_PASSWORD: abcde
       POSTGRES_USER: jay
       POSTGRES_DB: kaguyasp
+    #networks:
+    #  - internal
     volumes: 
       - "/media/fast/ctx_db:/var/lib/postgresql/data"
     ports:
         - "8001:5432"
-    command: -c shared_buffers=8GB -c max_connections=200
+    command: -c shared_buffers=8GB -c max_connections=250
+
   admin:
       image: thajeztah/pgadmin4
       ports:
         - "8004:5050"
+      #networks:
+      #  - internal
+      labels:
+        - "traefik.docker.network=internal"
+        - "traefik.frontend.rule=Host:smalls;PathPrefixStrip:/pgadmin;AddPrefix:/browser"
+        - "traefik.port=5050"
+
   pgbouncer:
       image: brainsam/pgbouncer
       ports:
         - "8003:6543"
+      #networks:
+      #- internal
       volumes:
         - "./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini"
         - "./pgbouncer.log:/var/log/pgbouncer/pgbouncer.log"
-        - "./users.txt:/etc/pgbouncer/users.txt"
+        - "./users.txt:/dd36d41d6c3betc/pgbouncer/users.txt"
+  
   pfeffernusse:
       image: jlaura/pfeffernusse
       ports:
           - "8002:5000"
+      #networks:
+      #  - internal
+      #  - proxy
       volumes:
           - "/data/spice:/data/spice"
+      labels:
+          - traefik.port=5000
+          - traefik.docker.network=internal
+          - "traefik.frontend.rule=Host:smalls;PathPrefixStrip:/pfeffernusse"
+  
   redis:
       image: redis:4.0.8-alpine
       command: redis-server /usr/local/etc/redis/redis.conf
@@ -36,4 +57,32 @@ services:
            - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
       ports:
           - "8000:6379"
+      #networks:
+      #  - internal
+  reverse-proxy:
+    image: traefik # The official Traefik docker image
+    command: --api --docker --logLevel="DEBUG" # Enables the web UI and tells Træfik to listen to docker
+    ports:
+      - "80:80"     # The HTTP port
+      - "8080:8080" # The Web UI (enabled by --api)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # So that Traefik can listen to the Docker events
+    #networks:
+    # - proxy
+    # - internal
+  
+  whoami:
+    image: emilevauge/whoami # A container that exposes an API to show its IP address
+    #networks:
+    # - proxy
+    # - internal
+    labels:
+     - traefik.docker.network=internal
+     - traefik.backend=whoami
+     - "traefik.frontend.rule=Host:smalls;Path:/whoami/"
 
+#networks:
+#  proxy:
+#    external: true
+#  internal:
+#   external: false
