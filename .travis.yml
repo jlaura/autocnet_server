@@ -1,0 +1,66 @@
+language: generic  # Since we use conda, just go generic
+sudo: false
+
+branches:
+only:
+  - master
+
+env:
+  global:
+    - BINSTAR_USER: jlaura
+
+os:
+  - linux
+  - osx
+
+env:
+  - PYTHON_VERSION=3.5
+  - PYTHON_VERSION=3.6
+
+before_install:
+  # We do this conditionally because it saves us some downloading if the
+  # version is the same.
+  - if [ "$TRAVIS_OS_NAME" == "linux" ]; then
+      wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh;
+    else
+      curl -o miniconda.sh  https://repo.continuum.io/miniconda/Miniconda3-latest-MacOSX-x86_64.sh;
+    fi
+  - bash miniconda.sh -b -p $HOME/miniconda
+  - export PATH="$HOME/miniconda/bin:$PATH"
+  - hash -r
+  - conda config --set always_yes yes --set changeps1 no
+  - conda update -q conda
+  # Useful for debugging any issues with conda
+  - conda info -a
+  # Create the env
+  - conda create -q -n test python=$PYTHON_VERSION
+  - source activate test
+
+  # Install dependencies
+  - conda config --add channels conda-forge
+  - conda config --add channels menpo
+  - conda config --add channels usgs-astrogeology
+  - conda config --set ssl_verify false
+  - conda install -c conda-forge vlfeat cyvlfeat plio scipy networkx numexpr cython matplotlib pillow runipy geopandas opencv numpy gdal autocnet
+
+  # Development installation
+  # - conda install pytest pytest-cov coverage sh anaconda-client
+  # - pip install coveralls
+
+script:
+  # - pytest autocnet tests
+
+after_success:
+  # - coveralls
+  # Need to do the build in the root
+  - source deactivate
+  - conda install conda-build anaconda-client
+  - conda config --set anaconda_upload yes
+  - conda build --token $CONDA_UPLOAD_TOKEN --python $PYTHON_VERSION conda
+
+notifications:
+  webhooks:
+    urls:
+      - https://webhooks.gitter.im/e/6cbe4b65fff6764ed80f
+    on_success: always
+    on_failure: always

@@ -1,0 +1,44 @@
+package:
+  name: autocnet_server
+  version: 0.1.0
+
+source:
+   #git_url: https://github.com/USGS-Astrogeology/autocnet.git
+   path: ../
+requirements:
+  build:
+    - python
+    - vlfeat
+    - cyvlfeat
+    - pillow
+    - scipy
+    - networkx
+    - numexpr
+    - cython
+    - matplotlib
+    - geopandas
+    - opencv3
+    - numpy
+    - plio
+    - gdal
+    - autocnet
+  run:
+    - python
+    - vlfeat
+    - cyvlfeat
+    - pillow
+    - scipy
+    - networkx
+    - numexpr
+    - cython
+    - matplotlib
+    - geopandas
+    - opencv3
+    - numpy
+    - plio
+    - gdal
+    - autocnet
+
+test:
+  imports:
+    - autocnet_server
