@@ -12,6 +12,7 @@ slurm_script = textwrap.dedent("""\
                               #SBATCH -o {}
                               #SBATCH -p {}
                               #SBATCH --exclude=neb[13-20],gpu1
+                              source activate {}
                               {}""")
 
 slurm_array = textwrap.dedent("""\
@@ -23,10 +24,12 @@ slurm_array = textwrap.dedent("""\
                               #SBATCH -t {}
                               #SBATCH -p {}
                               #SBATCH --exclude=neb[13-20],gpu1
-                              {} {}
+                              source activate {}
+                              which python
+                              {}
 """)
 
-def spawn(command, name='AutoCNet', time='01:00:00', outdir='/home/jlaura/autocnet_server/%j.log', mem=2048, queue='shortall'):
+def spawn(command, name='AutoCNet', time='01:00:00', outdir='/home/jlaura/autocnet_server/%j.log', mem=2048, queue='shortall', env='root'):
     """
     f : str
         file path
@@ -34,7 +37,7 @@ def spawn(command, name='AutoCNet', time='01:00:00', outdir='/home/jlaura/autocn
 
     process = subprocess.Popen(['sbatch'], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE)
-    job_string = slurm_script.format(mem, name, time, outdir, queue, command)
+    job_string = slurm_script.format(mem, name, time, outdir, queue, env, command)
     process.stdin.write(str.encode(job_string))
     out, err = process.communicate()
     if err:
@@ -49,13 +52,13 @@ def spawn(command, name='AutoCNet', time='01:00:00', outdir='/home/jlaura/autocn
     #    pass
     return job_string
 
-def spawn_jobarr(py, command, njobs, name='AutoCNet', time='01:00:00',mem=2048, queue='shortall', outdir=r"slurm-%A_%a.out"):
+def spawn_jobarr(command, njobs, name='AutoCNet', time='01:00:00',mem=2048, queue='shortall', outdir=r"slurm-%A_%a.out", env='root'):
     
     process = subprocess.Popen(['sbatch', '--array', '1-{}'.format(njobs)],
                                 stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE)
 
-    job_string = slurm_array.format(mem, outdir, name, time, queue, py, command)
+    job_string = slurm_array.format(mem, outdir, name, time, queue, env, command)
     process.stdin.write(str.encode(job_string))
     out, err = process.communicate()
     if err:
