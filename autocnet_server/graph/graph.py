@@ -153,6 +153,13 @@ class NetworkNode(node.Node):
     #    pass
 
 class NetworkEdge(edge.Edge):
+
+    default_msg = {'sidx':None,
+                    'didx':None,
+                    'task':None,
+                    'param_step':0,
+                    'success':False}
+
     def __init__(self, *args, **kwargs):
         super(NetworkEdge, self).__init__(*args, **kwargs)
         self.job_status = defaultdict(dict)
@@ -219,32 +226,26 @@ class NetworkEdge(edge.Edge):
         node = getattr(self, node)
         return self.get_keypoints(node, index=index, homogeneous=homogeneous, overlap=overlap)
 
+    def _populate_msg(self, func):
+        dmsg = self.default_msg
+        dmsg['sidx'] = self.source['node_id']
+        dmsg['didx'] = self.destination['node_id']
+        dmsg['task'] = func
+        dmsg['callback'] = func + '_callback'
+        return dmsg
+
     def compute_fundamental_matrix(self):
         if len(self.job_status['fundamental_matrix']) == 0:
             parameters = config['algorithms']['fundamental_matrix'][0]
-            default_msg = {'sidx':self.source['node_id'],
-                            'didx':self.destination['node_id'],
-                            'time':'',
-                            'task':'compute_fundamental',
-                            'param_step':0,
-                            'count':0,
-                            'success':False}
-            self.job_status['fundamental_matrix'] = {**default_msg, **parameters}
-        return self.job_status['fundamental_matrix']
+            default_msg = self._populate_msg('compute_fundamental_matrix')
+            self.job_status['compute_fundamental_matrix'] = {**default_msg, **parameters}
+        return self.job_status['compute_fundamental_matrix']
 
     def ring_match(self):
         if len(self.job_status['ring_match']) == 0:
             parameters = config['algorithms']['ring_match'][0]
-            self.job_status['ring_match'] = {'sidx':self.source['node_id'],
-                                             'didx':self.destination['node_id'],
-                                             'time':'',
-                                             'task':'ring_match',
-                                             'success':False,
-                                             'param_step':0,
-                                             'count':0,
-                                             'target_points':parameters['target_points'],
-                                             'tolerance':parameters['tolerance']}
-
+            default_msg = self._populate_msg('ring_match')
+            self.job_status['ring_match'] = {**default_msg, **parameters}
         return self.job_status['ring_match']
 
 
@@ -265,6 +266,8 @@ class NetworkCandidateGraph(network.CandidateGraph):
             d.parent = self
         for s, d, e in self.edges(data='data'):
             e.parent = self
+
+        self.processing_queue = config['redis']['processing_queue']
 
     def __key(self):
         # TODO: This needs to be a real self identifying key
@@ -312,9 +315,9 @@ class NetworkCandidateGraph(network.CandidateGraph):
         """
         Setup a 2 queue redis connection for pushing and pulling work/results
         """
-        # TODO: Remove hard coding and graph from config
-        self.redis_queue = StrictRedis(host='smalls',
-                                       port=8000,
+        conf = config['redis']
+        self.redis_queue = StrictRedis(host=conf['host'],
+                                       port=conf['port'],
                                        db=0)
 
     def _setup_asynchronous_queue_watchers(self, nwatchers=3):
@@ -374,119 +377,86 @@ class NetworkCandidateGraph(network.CandidateGraph):
         res.delete(synchronize_session=False)
         self.session.commit()
 
-    def compute_fundamental_matrices(self, edges=[], walltime='00:10:00'):
+    def generic_cluster_submit(self, func, script, edges=[], walltime='01:00:00'):
         t = time.time()
+        msgs = []
+
         if edges:
             for job_counter, e in enumerate(edges):
-                msg = self.edges[e]['data'].compute_fundamental_matrix()
-                msg['walltime'] = walltime
-                msg['callback'] = 'compute_fundamental_callback'
-                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
+                msg = getattr(self.edges[e]['data'], func)()
+                msgs.append(msg)
         else:
-            for job_counter, (s, d, e) in enumerate(self.edges(data='data')):
-                msg = e.compute_fundamental_matrix()
-                msg['walltime'] = walltime
-                msg['callback'] = 'compute_fundamental_callback'
-                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))   
+            for job_counter, (s,d,e) in enumerate(self.edges(data='data')):
+                msg = getattr(e, func)()
+                msgs.append(msg)
         job_counter += 1
-        script = 'acn_estimate_fundamental'
-        spawn_jobarr(config['python']['pybin'], script,job_counter,
-                     mem=config['cluster']['processing_memory'],
-                     time=walltime, queue=config['cluster']['queue'],
-                     outdir=config['cluster']['cluster_log_dir']+'/slurm-%A_%a.out')
 
+        for m in msgs:
+            m['walltime'] = walltime
+            self.redis_queue.rpush(self.processing_queue, json.dumps(msg))
+        
+        spawn_jobarr(script, job_counter,
+                     mem=config['cluster']['processing_memory'],
+                     time=walltime,
+                     queue=config['cluster']['queue'],
+                     outdir=config['cluster']['cluster_log_dir']+'/slurm-%A_%a.out',
+                     env=config['python']['env_name'])
+        
         return job_counter
+
+    def compute_fundamental_matrices(self, edges=[], walltime='00:10:00'):
+        return self.generic_cluster_submit('compute_fundamental_matrix', 
+                                           'acn_compute_fundamental_matrix',
+                                           edges=edges, walltime=walltime)
+
 
     def ring_match(self, edges=[], walltime='01:00:00'):
-        t = time.time()
-        if edges:
-            for job_counter, e in enumerate(edges):
-                msg = self.edges[e]['data'].ring_match()
-                msg['walltime'] = walltime
-                msg['callback'] = 'ring_matcher_callback'
-                # Put the message onto the redis queue for processing
-                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
-        else:
-            for job_counter, (s, d, e) in enumerate(self.edges(data='data')):
-                msg = e.ring_match()
-                msg['walltime'] = walltime
-                msg['callback'] = 'ring_matcher_callback'
-                # Put the message onto the redis queue for processing
-                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
-        job_counter += 1 # Slurm counter is 1 based.
-        # TODO: This should not be hard coded, but pulled from the install location
-        script = 'acn_ring_match'
-        spawn_jobarr(config['python']['pybin'], script,job_counter,
-                     mem=config['cluster']['processing_memory'],
-                     time=walltime, queue=config['cluster']['queue'],
-                     outdir=config['cluster']['cluster_log_dir']+'/slurm-%A_%a.out')
+        return self.generic_cluster_submit('ring_match',
+                                           'acn_ring_match',
+                                           edges=edges, walltime=walltime)
 
-        return job_counter
-
-    def compute_fundamental_callback(self, msg):
+    def generic_callback(self, msg):
         source = msg['sidx']
         destination = msg['didx']
-        e = self.edges[source, destination]['data']
-        js = e.job_status['fundamental_matrix']
-        if msg['success'] == True:
-            js['success'] = True
-        else:
-            if js['count'] <= config['cluster']['maxfailures']:
-                js['count'] += 1
-                js['param_step'] += 1
-                if js['param_step'] >= len(config['algorithms']['fundamental_matrix']):
-                    return
-                # Increment the parameter space defined in the config
-                current_param_step = js['param_step']
-                parameters = config['algorithms']['fundamental_matrix'][current_param_step]
-                for k, v in parameters.items():
-                    js[k] = v
-                # Reset the submission time
-                js['time'] = time.time()
-                # Respawn the job using the normal slurm method
-                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(js))
-                # This hard coded command is poor form in that this is making the ring_matcher
-                # now parameterize differently, what we want to do here is think about adding
-                # some devision making to the system - if matching well fails, reduce either
-                # the threshold tolerance or the number of required 'good' points
-                cmd = '{} estimate_fundamental'.format(config['python']['pybin'])
-                spawn(cmd, mem=config['cluster']['processing_memory'],
-                      time=msg['walltime'], queue=config['cluster']['queue'], 
-                      outdir=config['cluster']['cluster_log_dir']+'/slurm-%j.out')
+        func = msg['task']
 
-    def ring_matcher_callback(self, msg):
-        source = msg['sidx']
-        destination = msg['didx']
-
-        # Pull the correct edge and dispatch to generate the match objs
         e = self.edges[source, destination]['data']
-        rm = e.job_status['ring_match']
-        if msg['success']:
-            rm['success'] = True
-        else:
-            print(rm)
-            if rm['count'] <= config['cluster']['maxfailures']:
-                rm['count'] += 1
-                rm['param_step'] += 1
-                if rm['param_step'] >= len(config['algorithms']['ring_match']):
-                    # All parameter combinations are exhausted
-                    return
-                # Increment the parameter space defined in the config
-                current_param_step = rm['param_step']
-                parameters = config['algorithms']['ring_match'][current_param_step]
-                rm['target_points'] = parameters['target_points']
-                rm['tolerance'] = parameters['tolerance']
-                rm['time'] = time.time()
-                # Respawn the job using the normal slurm method
-                self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(rm))
-                # This hard coded command is poor form in that this is making the ring_matcher
-                # now parameterize differently, what we want to do here is think about adding
-                # some devision making to the system - if matching well fails, reduce either
-                # the threshold tolerance or the number of required 'good' points
-                cmd = '{} ring_match'.format(config['python']['pybin'])
-                spawn(cmd, mem=config['cluster']['processing_memory'],
-                      time=msg['walltime'], queue=config['cluster']['queue'],
-                      out=config['cluster']['cluster_log_dir']+'/slurm-%j.out')
+        e.job_status[func]['success'] = msg['success']
+
+        # If the job was successful, no need to resubmit
+        if e.job_status[func]['success'] == True:
+            return
+
+        # Increment the parameter stepper to get the next parameter set
+        msg['param_step'] += 1
+
+        # Processing failed, and all parameter sets exhausted
+        if msg['param_step'] >= len(config['algorithms'][func]):
+            e.job_status[func]['param_step'] = msg['param_step']
+            return 
+        
+        # Update the message with the new parameter set
+        parameters = config['algorithms'][func][msg['param_step']]
+        for k, v in parameters.items():
+            msg[k] = v
+
+        # Push the updated message and resubmit
+        self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
+        getattr(self, func + '_callback')(msg)
+        
+    def compute_fundamental_matrix_callback(self, msg):
+        cmd = 'acn_compute_fundamental_matrix'
+        spawn(cmd, mem=config['cluster']['processing_memory'],
+                time=msg['walltime'], queue=config['cluster']['queue'], 
+                outdir=config['cluster']['cluster_log_dir']+'/slurm-%j.out',
+                env=config['python']['env_name'])
+
+    def ring_match_callback(self, msg):
+        cmd = 'acn_ring_match'
+        spawn(cmd, mem=config['cluster']['processing_memory'],
+                time=msg['walltime'], queue=config['cluster']['queue'],
+                outdir=config['cluster']['cluster_log_dir']+'/slurm-%j.out',
+                env=config['python']['env_name'])
 
     def create_network(self, nodes=[]):
         cmds = 0
@@ -505,9 +475,10 @@ class NetworkCandidateGraph(network.CandidateGraph):
                 self.redis_queue.rpush(config['redis']['processing_queue'], msg)
                 cmds += 1
         script = 'acn_create_network'
-        spawn_jobarr(config['python']['pybin'], script, cmds,
+        spawn_jobarr(script, cmds,
                     mem=config['cluster']['processing_memory'],
-                    queue=config['cluster']['queue'])
+                    queue=config['cluster']['queue'],
+                    env=config['python']['env_name'])
 
     @classmethod
     def from_database(cls, query_string='SELECT * FROM public.Images'):
@@ -629,7 +600,6 @@ class AsynchronousFailedWatcher(threading.Thread):
 
             # Remove the message from the work queue is it is expired.
             for msg in to_pop_and_resubmit:
-                callback_func = getattr(self.parent, msg['callback'])
+                callback_func = getattr(self.parent, 'generic_callback')
                 self.queue.lrem(self.name,0, json.dumps(msg))
-                callback_func(msg)
-            
+                self.parent.generic_callback(msg)

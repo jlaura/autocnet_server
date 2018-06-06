@@ -6,7 +6,6 @@ import json
 import os
 import pickle
 import sys
-import time
 
 import numpy as np
 import ogr
@@ -33,7 +32,7 @@ if asp:
 from autocnet_server.camera.csm_camera import ecef_to_latlon
 from autocnet_server.db import connection
 from autocnet_server.db.model import Keypoints, Matches, Cameras, Edges
-from autocnet_server.utils.utils import slurm_walltime_to_seconds
+from autocnet_server.db.redis_queue import pop_computetime_push, finalize
 from autocnet.matcher.cpu_ring_matcher import ring_match, add_correspondences
 from autocnet.io.keypoints import from_hdf
 
@@ -59,7 +58,7 @@ def check_pidx_duplicates(pidx):
     pidx = pidx[clean, :]
     return pidx
 
-def match(msg, args):
+def main(msg, args):
 
     # Get the s/d ids from the message queue and then grab the paths from the
     # DB
@@ -79,12 +78,6 @@ def match(msg, args):
     ref_kps, ref_desc = from_hdf(sfile)
     tar_kps, tar_desc = from_hdf(dfile)
 
-    # Default message
-    data = {'success':False,
-            'sidx': msg['sidx'], 'didx': msg['didx'],
-            'count':msg['count'],
-            'callback':'ring_matcher_callback'}
-
     ref_feats = ref_kps[['x', 'y', 'xm', 'ym', 'zm']].values
     tar_feats = tar_kps[['x', 'y', 'xm', 'ym', 'zm']].values
 
@@ -96,14 +89,6 @@ def match(msg, args):
                                     max_radius=args.maxradius,
                                     target_points=target_points,
                                     tolerance_val=tolerance)
-        # Insert the subpixel matcher here
-        rmse = np.ones(pidx.shape[0])
-        pidx = check_pidx_duplicates(pidx)
-        for row in pidx:
-            rid = row[0]
-            tid = row[1]
-
-            
 
         if pidx is None:
             print('Unable to find a solution.')
@@ -144,19 +129,8 @@ def match(msg, args):
     pidx = check_pidx_duplicates(pidx)
 
     # Package the data to round trip to the server
-    data['success'] = True
-    return data, (pidx, ref_feats[pidx[:,0]], tar_feats[pidx[:,1]], ring, camera)
-
-def finalize(data, queue, msg):
-
-    for k, v in data.items():
-        if isinstance(v, np.ndarray):
-            data[k] = v.tolist()
-
-    queue.rpush(config['redis']['completed_queue'], json.dumps(data))
-
-    # Now that work is done, clean out the 'working queue'
-    queue.lrem(config['redis']['working_queue'], 0, msg)
+    msg['success'] = True
+    return msg, (pidx, ref_feats[pidx[:,0]], tar_feats[pidx[:,1]], ring, camera)
 
 def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
     
@@ -191,20 +165,23 @@ def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
 
 if __name__ == '__main__':
     args = parse_args()
-    queue = StrictRedis( host="smalls", port=8000, db=0)
-    # Load the message out of the processing queue and add a max processing time key
-    
-    msg = json.loads(queue.rpop(config['redis']['processing_queue']))
-    msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
-    working_queue_msg = json.dumps(copy.copy(msg))
-    
-    # Push the message to the processing queue with the updated max_time
-    queue.rpush(config['redis']['working_queue'], working_queue_msg)
-    # Apply the matcher
-    data, to_db = match(msg, args)
+    queue = StrictRedis(host="smalls", port=8000, db=0)
+
+    msg = pop_computetime_push(queue,
+                               config['redis']['processing_queue'],
+                               config['redis']['working_queue'])
+
+    # In order to pop an entry off the queue, we need the exact contents
+    remove_key = copy.copy(msg)
+
+    # Apply the algorithm
+    response, to_db = main(msg, args)
     
     # Write to the database if successful
-    if data['success']:
-        write_to_db(*to_db, msg)
+    if response['success']:
+        write_to_db(*to_db, response)
+    
     # Alert the caller on failure to relaunch with next parameter set
-    finalize(data, queue, working_queue_msg)
+    finalize(response, remove_key, queue, 
+             config['redis']['completed_queue'],
+             config['redis']['working_queue'])
