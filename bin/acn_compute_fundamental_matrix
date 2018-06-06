@@ -135,7 +135,7 @@ if __name__ == '__main__':
     response, to_db = main(msg)
     
     # Write to the database if successful
-    if reponse['success']:
+    if response['success']:
         write_to_db(*to_db, response)
     
     # Alert the caller on failure to relaunch with next parameter set
