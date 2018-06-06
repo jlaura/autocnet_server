@@ -92,7 +92,7 @@ def main(msg, args):
 
         if pidx is None:
             print('Unable to find a solution.')
-            return data
+            return msg
         elif pidx.shape[0] >= target_points:
             break
 
