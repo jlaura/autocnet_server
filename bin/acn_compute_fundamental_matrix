@@ -111,7 +111,6 @@ def main(msg):
 
     if F is not None:
         msg['success'] = True
-       
 
     return msg, (source_id, destin_id, F)
 
@@ -133,10 +132,10 @@ if __name__ == '__main__':
     
     # Apply main
     response, to_db = main(msg)
-    
+    print(response)
     # Write to the database if successful
     if response['success']:
-        write_to_db(*to_db, response)
+        write_to_db(*to_db)
     
     # Alert the caller on failure to relaunch with next parameter set
     finalize(response, remove_key, queue, 

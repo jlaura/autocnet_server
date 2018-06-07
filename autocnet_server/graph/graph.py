@@ -235,8 +235,8 @@ class NetworkEdge(edge.Edge):
         return dmsg
 
     def compute_fundamental_matrix(self):
-        if len(self.job_status['fundamental_matrix']) == 0:
-            parameters = config['algorithms']['fundamental_matrix'][0]
+        if len(self.job_status['compute_fundamental_matrix']) == 0:
+            parameters = config['algorithms']['compute_fundamental_matrix'][0]
             default_msg = self._populate_msg('compute_fundamental_matrix')
             self.job_status['compute_fundamental_matrix'] = {**default_msg, **parameters}
         return self.job_status['compute_fundamental_matrix']
@@ -393,7 +393,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
         for m in msgs:
             m['walltime'] = walltime
-            self.redis_queue.rpush(self.processing_queue, json.dumps(msg))
+            self.redis_queue.rpush(self.processing_queue, json.dumps(m))
         
         spawn_jobarr(script, job_counter,
                      mem=config['cluster']['processing_memory'],

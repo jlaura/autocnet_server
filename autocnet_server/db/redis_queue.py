@@ -28,6 +28,7 @@ def pop_computetime_push(queue, inqueue, outqueue):
     """
     # Load the message out of the processing queue and add a max processing time key
     msg = json.loads(queue.rpop(inqueue))
+    print(msg)
     msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
     
     # Push the message to the processing queue with the updated max_time
