@@ -27,7 +27,6 @@ if asp:
 
 pl = config.get('developer', {}).get('plio_path', None)
 if pl:
-    print(pl)
     sys.path.insert(0, pl)
 
 from plio.io.io_gdal import GeoDataset
@@ -105,20 +104,36 @@ def main(msg):
     subpixel_source = spts[good]
     subpixel_destin = dpts[good]
 
+    original_mask = np.zeros(nmatches, dtype=np.bool)
+
     F, mask = compute_fundamental_matrix(subpixel_source, subpixel_destin,
                                          reproj_threshold=reproj_threshold,
                                          method='ransac')
 
+    # Update full size mask with the True values that come out of the F matrix computation
+    original_mask[good] = mask
+    print(original_mask)
     if F is not None:
         msg['success'] = True
+    return msg, (source_id, destin_id, F, original_mask, dpts)
 
-    return msg, (source_id, destin_id, F)
-
-def write_to_db(sourceid, destinid, fmatrix):
+def write_to_db(sourceid, destinid, fmatrix, mask, subpixel_destin):
     session, _ = connection.new_connection(config)
     session.begin()
-    edge = session.query(Edges).filter(Edges.source == sourceid, Edges.destination == destinid).first()
-    setattr(edge, 'fundamental', fmatrix)
+    if fmatrix is not None:
+        edge = session.query(Edges).filter(Edges.source == sourceid, Edges.destination == destinid).first()
+        setattr(edge, 'fundamental', fmatrix)
+
+    # Update the matches dataframe here to set valid=False 
+    # for any points that were fundamental masked.
+
+    # TODO: Masking
+    matches = session.query(Matches).filter(Matches.source == sourceid,
+                                            Matches.destination == destinid)
+    for i, m in enumerate(matches):
+        m.valid = bool(mask[i]) # SQLAlchemy does not support numpy bools
+        m.destination_x = subpixel_destin[i][0]
+        m.destination_y = subpixel_destin[i][1]
     session.commit()
     session.close()
 
@@ -128,15 +143,12 @@ if __name__ == '__main__':
                             config['redis']['processing_queue'],
                             config['redis']['working_queue'])
 
-    remove_key = copy.copy(msg)
+    remove_key = copy.deepcopy(msg)
     
     # Apply main
     response, to_db = main(msg)
-    print(response)
-    # Write to the database if successful
-    if response['success']:
-        write_to_db(*to_db)
-    
+
+    write_to_db(*to_db)
     # Alert the caller on failure to relaunch with next parameter set
     finalize(response, remove_key, queue, 
              config['redis']['completed_queue'],

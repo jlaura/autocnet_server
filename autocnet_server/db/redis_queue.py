@@ -28,9 +28,8 @@ def pop_computetime_push(queue, inqueue, outqueue):
     """
     # Load the message out of the processing queue and add a max processing time key
     msg = json.loads(queue.rpop(inqueue))
-    print(msg)
     msg['max_time'] = time.time() + slurm_walltime_to_seconds(msg['walltime'])
-    
+
     # Push the message to the processing queue with the updated max_time
     queue.rpush(outqueue, json.dumps(msg))
 
@@ -60,8 +59,7 @@ def finalize(response, remove_key, queue, outqueue, removequeue):
     for k, v in response.items():
         if isinstance(v, np.ndarray):
             response[k] = v.tolist()
-
     queue.rpush(outqueue, json.dumps(response))
 
     # Now that work is done, clean out the 'working queue'
-    queue.lrem(removequeue, 0, remove_key)
+    queue.lrem(removequeue, 0, json.dumps(remove_key))

@@ -380,7 +380,6 @@ class NetworkCandidateGraph(network.CandidateGraph):
     def generic_cluster_submit(self, func, script, edges=[], walltime='01:00:00'):
         t = time.time()
         msgs = []
-
         if edges:
             for job_counter, e in enumerate(edges):
                 msg = getattr(self.edges[e]['data'], func)()
@@ -563,9 +562,7 @@ class AsynchronousQueueWatcher(threading.Thread):
         while True:
             msg = self.queue.lpop(self.name)  # or blpop?
             if msg:
-                msg = json.loads(msg)
-                callback_func = getattr(self.parent, msg['callback'])
-                callback_func(msg)
+                callback_func = self.parent.generic_callback(json.loads(msg))
 
 class AsynchronousFailedWatcher(threading.Thread):
 
