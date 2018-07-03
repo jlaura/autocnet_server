@@ -9,7 +9,7 @@ services:
     #networks:
     #  - internal
     volumes: 
-      - "/media/fast/ctx_db:/var/lib/postgresql/data"
+      - "/data/fast/ctx_db:/var/lib/postgresql/data"
     ports:
         - "8001:5432"
     command: -c shared_buffers=8GB -c max_connections=250
@@ -33,8 +33,7 @@ services:
       #- internal
       volumes:
         - "./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini"
-        - "./pgbouncer.log:/var/log/pgbouncer/pgbouncer.log"
-        - "./users.txt:/dd36d41d6c3betc/pgbouncer/users.txt"
+        - "./users.txt:/etc/pgbouncer/users.txt"
   
   pfeffernusse:
       image: jlaura/pfeffernusse

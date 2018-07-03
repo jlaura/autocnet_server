@@ -175,8 +175,8 @@ class NetworkEdge(edge.Edge):
                     The declared table class (from db.model)
         """
         return self.parent.session.query(table_obj).\
-               filter(table_obj.source == self.source['node_id'],
-               filter(table_obj.destination == self.destination['node_id']))
+               filter(table_obj.source == self.source['node_id']).\
+               filter(table_obj.destination == self.destination['node_id'])
 
     @property
     def matches(self):
@@ -192,6 +192,10 @@ class NetworkEdge(edge.Edge):
             d_fp = self.destination.footprint
             self._intersection = s_fp.intersection(d_fp)
         return self._intersection
+    
+    @property
+    def fundamental_matrix(self):
+        return self._from_db(Edges).first().fundamental
 
     #def clean(self):
     #    pass

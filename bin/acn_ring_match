@@ -172,8 +172,8 @@ if __name__ == '__main__':
                                config['redis']['working_queue'])
 
     # In order to pop an entry off the queue, we need the exact contents
-    remove_key = copy.copy(msg)
-
+    remove_key = copy.deepcopy(msg)
+    
     # Apply the algorithm
     response, to_db = main(msg, args)
     

@@ -50,7 +50,7 @@ class ImageAdder():
                                                hostname,
                                                config['pyro']['image_adder_port'])
 
-        command = '{} /home/jlaura/autocnet_server/bin/extract_features.py {} {}'
+        command = '{} acn_extract_features {} {}'   
         command = command.format(config['python']['pybin'], path, callback_uri)
         if config['cluster']['cluster_log_dir'] is not None:
             log_out = config['cluster']['cluster_log_dir'] + '/%j.log'
