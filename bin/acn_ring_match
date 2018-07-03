@@ -29,7 +29,7 @@ asp = config.get('developer', {}).get('autocnet_server_path', None)
 if asp:
     sys.path.insert(0, asp)
 
-from autocnet_server.camera.csm_camera import ecef_to_latlon
+from plio.spatial.transformations import reproject
 from autocnet_server.db import connection
 from autocnet_server.db.model import Keypoints, Matches, Cameras, Edges
 from autocnet_server.db.redis_queue import pop_computetime_push, finalize
@@ -144,9 +144,13 @@ def write_to_db(pidx, refkps, tarkps, ring, camera, msg):
         dy = float(tarkps[i][1])
         # Use the source camera to project the sx, sy to ground
         gnd = camera.imageToGround(sy, sx, 0)
-        lon, lat, alt = ecef_to_latlon(gnd)
+        lon, lat, alt = reproject(gnd,
+                                 config['spatial']['semimajor_rad'],
+                                 config['spatial']['semiminor_rad'],
+                                 'geocent',
+                                 'latlon')
         # TODO: Hard coded srid needs to be set at the project level
-        geom = 'SRID=949900;POINTZ({} {} {})'.format(lon, lat, alt)
+        geom = 'SRID={};POINTZ({} {} {})'.format(config['spatial']['srid'], lon, lat, alt)
         m = Matches(source=msg['sidx'], source_idx=sidx,
                     destination=msg['didx'], destination_idx=didx,
                     lat=float(lat), lon=float(lon), geom=geom,

@@ -44,8 +44,9 @@ from autocnet.utils import utils
 from autocnet.io import keypoints as io_keypoints
 from autocnet.transformation.fundamental_matrix import compute_reprojection_error
 
-from autocnet_server.camera.csm_camera import create_camera, ecef_to_latlon
-from autocnet_server.camera import generate_vrt
+from plio.camera.csm import create_camera
+from plio.utils import generate_vrt
+
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges
 from autocnet_server.db.connection import new_connection
