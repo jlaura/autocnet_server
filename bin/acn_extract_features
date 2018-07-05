@@ -41,8 +41,8 @@ from autocnet.matcher.cuda_extractor import extract_features
 from autocnet.utils.utils import tile
 from autocnet.io.keypoints import to_hdf
 
-from autocnet_server.camera.csm_camera import create_camera
-from autocnet_server.camera import footprint
+from plio.camera.csm import create_camera
+from plio.spatial import footprint
 from autocnet_server.utils.utils import create_output_path
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras
 from autocnet_server.db.connection import new_connection

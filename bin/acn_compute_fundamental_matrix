@@ -31,7 +31,6 @@ if pl:
 
 from plio.io.io_gdal import GeoDataset
 
-from autocnet_server.camera.csm_camera import ecef_to_latlon
 from autocnet_server.db import connection
 from autocnet_server.db.model import  Keypoints, Matches, Edges, Images
 from autocnet_server.db.redis_queue import pop_computetime_push, finalize
