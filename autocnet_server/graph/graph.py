@@ -74,11 +74,19 @@ class NetworkNode(Node):
         super(NetworkNode, self).__init__(*args, **kwargs)
 
         if exists is False:
-            cam = self.camera
-            kpf = self.keypoint_file
+            # Create the camera entry
+            cam = create_camera(self.geodata)
+            cam = pickle.dumps(cam, 2)
+            cam = Cameras(camera=cam)
+
+            # Create the keypoints entry
+            kps = Keypoints(path=kwargs['image_path'], nkeypoints=0)
+            
+            # Create the image
             i = Images(name=kwargs['image_name'],
                        path=kwargs['image_path'],
-                       footprint_latlon=self.footprint)
+                       footprint_latlon=self.footprint,
+                       cameras=cam, keypoints=kps)
             self.parent.session.add(i)
             try:
                 self.parent.session.commit()
@@ -112,17 +120,9 @@ class NetworkNode(Node):
     @property
     def keypoint_file(self):
         res = self._from_db(Keypoints)
-        outpath = res.path
         if res is None:
-            outpath = create_output_path(self.geodata)
-            k = Keypoints(path=outpath, nkeypoints=0)
-            self.parent.session.add(k)
-            try:
-                self.parent.session.commit()
-            except:
-                self.parent.session.begin()
-                self.parent.session.commit()
-        return outpath
+            return 
+        return res.path
 
     @property
     def keypoints(self):
@@ -175,11 +175,7 @@ class NetworkNode(Node):
             if res is not None:
                 self._camera = pickle.loads(res.camera)
             else:
-                self._camera = create_camera(self.geodata)
-                cam = pickle.dumps(self._camera, 2)
-                cam = Cameras(camera=cam)
-                self.parent.session.add(cam)
-                self.parent.session.commit()
+                return None
         return self._camera
 
     @property
