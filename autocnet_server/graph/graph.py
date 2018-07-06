@@ -18,8 +18,11 @@ from geoalchemy2.elements import WKTElement, WKBElement
 from shapely.geometry import Point
 import shapely
 
+from networkx.classes.reportviews import NodeView, EdgeView
 import numpy as np
 import pandas as pd
+from plio.spatial import footprint
+from plio.utils import utils as io_utils
 import pyproj
 
 from redis import StrictRedis
@@ -39,7 +42,10 @@ asp = config.get('developer', {}).get('autocnet_server_path', None)
 if asp:
     sys.path.insert(0, asp)
 
+from plio.camera.csm import create_camera
+
 from autocnet.graph import node, network, edge
+from autocnet.graph.node import Node
 from autocnet.utils import utils
 from autocnet.io import keypoints as io_keypoints
 from autocnet.transformation.fundamental_matrix import compute_reprojection_error
@@ -48,12 +54,39 @@ from autocnet_server.camera.csm_camera import create_camera, ecef_to_latlon
 from autocnet_server.camera import generate_vrt
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges
-from autocnet_server.db.connection import new_connection
-from autocnet_server.utils.utils import slurm_walltime_to_seconds
+from autocnet_server.db.connection import new_connection, Parent
+from autocnet_server.utils.utils import slurm_walltime_to_seconds, create_output_path
 
-class NetworkNode(node.Node):
-    def __init__(self, *args, **kwargs):
+class NetworkNode(Node):
+    def __init__(self, *args, parent=None, **kwargs):
+        # If this is the first time that the image is seen, add it to the DB
+        if parent is None:
+            self.parent = Parent(config)
+        else:
+            self.parent = parent
+        # For now, just use the PATH to determine if the node/image is in the DB
+        res = self.parent.session.query(Images).filter(Images.path == kwargs['image_path']).first()
+        exists = False
+        if res:
+            exists = True
+            kwargs['node_id'] = res.id
         super(NetworkNode, self).__init__(*args, **kwargs)
+
+        if exists is False:
+            cam = self.camera
+            kpf = self.keypoint_file
+            i = Images(name=kwargs['image_name'],
+                       path=kwargs['image_path'],
+                       footprint_latlon=self.footprint)
+            self.parent.session.add(i)
+            try:
+                self.parent.session.commit()
+            except:
+                self.parent.session.begin()
+                self.parent.session.commit()
+
+        
+        self.job_status = defaultdict(dict)
 
     def _from_db(self, table_obj, key='image_id'):
         """
@@ -71,7 +104,56 @@ class NetworkNode(node.Node):
               is the foreign key in the DB. For the Images table (the parent table),
               the key is simply 'id'.
         """
+        if 'node_id' not in self.keys():
+            return
         return self.parent.session.query(table_obj).filter(getattr(table_obj,key) == self['node_id']).first()
+
+    @property
+    def keypoint_file(self):
+        res = self._from_db(Keypoints)
+        outpath = res.path
+        if res is None:
+            outpath = create_output_path(self.geodata)
+            k = Keypoints(path=outpath, nkeypoints=0)
+            self.parent.session.add(k)
+            try:
+                self.parent.session.commit()
+            except:
+                self.parent.session.begin()
+                self.parent.session.commit()
+        return outpath
+
+    @property
+    def keypoints(self):
+        try:
+            return io_keypoints.from_hdf(self.keypoint_file, descriptors=False)
+        except:
+            return pd.DataFrame()
+            
+    @keypoints.setter
+    def keypoints(self, kps):
+        io_keypoints.to_hdf(self.keypoint_file, keypoints=kps)
+        res = self._from_db(Keypoints)
+        if res is None:
+            _ = self.keypoint_file
+            res = self._from_db(Keypoints)
+        res.nkeypoints = len(kps)
+        try:
+            self.parent.session.commit()
+        except:
+            self.parent.session.begin()
+            self.parent.session.commit()
+
+    @property
+    def descriptors(self):
+        try:
+            return io_keypoints.from_hdf(self.keypoint_file, keypoints=False)
+        except:
+            return
+
+    @descriptors.setter
+    def descriptors(self, desc):
+        io_keypoints.to_hdf(self.keypoint_file, descriptors=desc)
 
     @property
     def nkeypoints(self):
@@ -89,57 +171,26 @@ class NetworkNode(node.Node):
         """
         if not hasattr(self, '_camera'):
             res = self._from_db(Cameras)
-            self._camera = pickle.loads(res.camera)
+            if res is not None:
+                self._camera = pickle.loads(res.camera)
+            else:
+                self._camera = create_camera(self.geodata)
+                cam = pickle.dumps(self._camera, 2)
+                cam = Cameras(camera=cam)
+                self.parent.session.add(cam)
+                self.parent.session.commit()
         return self._camera
-
-    def get_keypoints(self, index=None, format='hdf', overlap=False, homogeneous=False, **kwargs):
-        """
-        Return the keypoints for the node.  If index is passed, return
-        the appropriate subset.
-        Parameters
-        ----------
-        index : iterable
-                indices for of the keypoints to return
-        Returns
-        -------
-         : dataframe
-           A pandas dataframe of keypoints
-        """
-        path = self.keypoint_file
-
-        if format == 'npy':
-            kps = io_keypoints.from_npy(path)
-        elif format == 'hdf':
-            kps = io_keypoints.from_hdf(path, index=index, descriptors=False, **kwargs)
-
-        kps = kps[['x', 'y']]  # Added for fundamental
-
-        if homogeneous:
-            # TODO: Make the kps homogeneous
-            pass
-
-        return kps
-
-    @property
-    def keypoint_file(self):
-        res = self._from_db(Keypoints)
-        return res.path
 
     @property
     def footprint(self):
         res = self.parent.session.query(Images).filter(Images.id == self['node_id']).first()
-        return to_shape(res.footprint_latlon)
-
-    def get_descriptors(self, index=None):
-        path = self.keypoint_file
-        if self.descriptors is None:
-            self.load_features(path, format='hdf')
-        if index is not None:
-            desc = self.descriptors[index]
+        if res is None:
+            footprint_latlon = footprint.generate_latlon_footprint(self.camera)
+            footprint_latlon = footprint_latlon.ExportToWkt()
+            footprint_latlon = WKTElement(footprint_latlon, srid=config['spatial']['srid'])
         else:
-            desc = self.descriptors
-        self.decriptors = None
-        return desc
+            footprint_latlon = to_shape(res.footprint_latlon)
+        return footprint_latlon
 
     def generate_vrt(self, **kwargs):
         """
@@ -149,8 +200,7 @@ class NetworkNode(node.Node):
         outpath = config['directories']['vrt_dir']
         generate_vrt.warped_vrt(self.camera, self.geodata.raster_size,
                                 self.geodata.file_name, outpath=outpath)
-    #def _clean(self):
-    #    pass
+
 
 class NetworkEdge(edge.Edge):
 
@@ -197,9 +247,6 @@ class NetworkEdge(edge.Edge):
     def fundamental_matrix(self):
         return self._from_db(Edges).first().fundamental
 
-    #def clean(self):
-    #    pass
-
     def get_overlapping_indices(self, kps):
         ecef = pyproj.Proj(proj='geocent',
 			   a=self.parent.config['spatial']['semimajor_rad'],
@@ -212,46 +259,6 @@ class NetworkEdge(edge.Edge):
         mask = [i for i in range(len(points)) if self.intersection.contains(points[i])]
         return mask
 
-    @utils.methodispatch
-    def get_keypoints(self, node, index=None, homogeneous=False, overlap=False):
-        if not hasattr(index, '__iter__') and index is not None:
-            raise TypeError
-        kps = node.get_keypoints(index=index, overlap=overlap)
-        if overlap:
-            indices = self.get_overlapping_indices(kps)
-            kps = kps.iloc[indices]
-        return kps
-
-    @get_keypoints.register(str)
-    def _(self, node, index=None, homogeneous=False, overlap=False):
-        if not hasattr(index, '__iter__') and index is not None:
-            raise TypeError
-        node = node.lower()
-        node = getattr(self, node)
-        return self.get_keypoints(node, index=index, homogeneous=homogeneous, overlap=overlap)
-
-    def _populate_msg(self, func):
-        dmsg = self.default_msg
-        dmsg['sidx'] = self.source['node_id']
-        dmsg['didx'] = self.destination['node_id']
-        dmsg['task'] = func
-        dmsg['callback'] = func + '_callback'
-        return dmsg
-
-    def compute_fundamental_matrix(self):
-        if len(self.job_status['compute_fundamental_matrix']) == 0:
-            parameters = config['algorithms']['compute_fundamental_matrix'][0]
-            default_msg = self._populate_msg('compute_fundamental_matrix')
-            self.job_status['compute_fundamental_matrix'] = {**default_msg, **parameters}
-        return self.job_status['compute_fundamental_matrix']
-
-    def ring_match(self):
-        if len(self.job_status['ring_match']) == 0:
-            parameters = config['algorithms']['ring_match'][0]
-            default_msg = self._populate_msg('ring_match')
-            self.job_status['ring_match'] = {**default_msg, **parameters}
-        return self.job_status['ring_match']
-
 
 class NetworkCandidateGraph(network.CandidateGraph):
     node_factory = NetworkNode
@@ -261,8 +268,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         super(NetworkCandidateGraph, self).__init__(*args, **kwargs)
         self._setup_db_connection()
         self._setup_queues()
-        self._setup_asynchronous_queue_watchers()
-
+        #self._setup_asynchronous_queue_watchers()
         # Job metadata
         self.job_status = defaultdict(dict)
 
@@ -272,16 +278,6 @@ class NetworkCandidateGraph(network.CandidateGraph):
             e.parent = self
 
         self.processing_queue = config['redis']['processing_queue']
-
-    def __key(self):
-        # TODO: This needs to be a real self identifying key
-        return 'abcde'
-
-    def __hash__(self):
-        return hash(self.__key())
-
-    def __eq__(self, other):
-        return type(self) == type(other) and self.__key() == other.__key()
 
     def _setup_db_connection(self):
         """
@@ -300,20 +296,6 @@ class NetworkCandidateGraph(network.CandidateGraph):
         # TODO: This adds the tables to the db if they do not exist already
         Base.metadata.bind = self._engine
         Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__, Edges.__table__])
-
-    @property
-    def unmatched_edges(self):
-        """
-        Returns a list of edges (source, destination) that do not have
-        entries in the matches dataframe.
-        """
-        #TODO: This is slow as it hits the database once for each set, optimization needed.
-        unmatched = []
-        for s, d, e in self.edges(data='data'):
-            if len(e.matches) == 0:
-                unmatched.append((s,d))
-
-        return unmatched
 
     def _setup_queues(self):
         """
@@ -339,6 +321,74 @@ class NetworkCandidateGraph(network.CandidateGraph):
         s = AsynchronousFailedWatcher(self, self.redis_queue, config['redis']['working_queue'])
         s.setDaemon(True)
         s.start()
+
+    def apply(self, function, on='edge',out=None, args=(), walltime='01:00:00', **kwargs):
+    
+        options = {
+            'edge' : self.edges,
+            'edges' : self.edges,
+            'e' : self.edges,
+            0 : self.edges,
+            'node' : self.nodes,
+            'nodes' : self.nodes,
+            'n' : self.nodes,
+            1 : self.nodes
+        }
+
+        # Determine which obj will be called
+        onobj = options[on]
+
+        res = []
+        key = 1
+        if isinstance(on, EdgeView):
+            key = 2
+
+        for job_counter, elem in enumerate(onobj.data('data')):
+            # Determine if we are working with an edge or a node
+            id = (elem[0])
+            image_path = elem[1]['image_path']
+            if len(elem) > 2:
+                id = (elem[0], elem[1])
+                image_path = (image_path, elem[2]['image_path'])
+            
+            msg = {'id':id,
+                    'func':function,
+                    'args':args,
+                    'kwargs':kwargs,
+                    'walltime':walltime,
+                    'image_path':image_path,
+                    'param_step':1}
+                
+            self.redis_queue.rpush(self.processing_queue, json.dumps(msg))
+
+        # SLURM is 1 based, while enumerate is 0 based
+        job_counter += 1
+
+        # Submit the jobs
+        spawn_jobarr('acn_submit', job_counter,
+                     mem=config['cluster']['processing_memory'],
+                     time=walltime,
+                     queue=config['cluster']['queue'],
+                     outdir=config['cluster']['cluster_log_dir']+'/slurm-%A_%a.out',
+                     env=config['python']['env_name'])
+        
+        return job_counter
+        
+    def generic_callback(self, msg):
+        id = msg['id']
+        if isinstance(id, (int, float, str)):
+            # Working with a node
+            obj = self.nodes[id]['data']
+        else:
+            obj = self.edges[id]['data']
+            # Working with an edge
+
+        func = msg['func']
+        obj.job_status[func]['success'] = msg['success']
+
+        # If the job was successful, no need to resubmit
+        if msg['success'] == True:
+            return
 
     def generate_vrts(self, **kwargs):
         for i, n in self.nodes(data='data'):
@@ -380,86 +430,6 @@ class NetworkCandidateGraph(network.CandidateGraph):
         res = oquery.filter(func.cardinality(Overlay.overlaps) <= 1)
         res.delete(synchronize_session=False)
         self.session.commit()
-
-    def generic_cluster_submit(self, func, script, edges=[], walltime='01:00:00'):
-        t = time.time()
-        msgs = []
-        if edges:
-            for job_counter, e in enumerate(edges):
-                msg = getattr(self.edges[e]['data'], func)()
-                msgs.append(msg)
-        else:
-            for job_counter, (s,d,e) in enumerate(self.edges(data='data')):
-                msg = getattr(e, func)()
-                msgs.append(msg)
-        job_counter += 1
-
-        for m in msgs:
-            m['walltime'] = walltime
-            self.redis_queue.rpush(self.processing_queue, json.dumps(m))
-        
-        spawn_jobarr(script, job_counter,
-                     mem=config['cluster']['processing_memory'],
-                     time=walltime,
-                     queue=config['cluster']['queue'],
-                     outdir=config['cluster']['cluster_log_dir']+'/slurm-%A_%a.out',
-                     env=config['python']['env_name'])
-        
-        return job_counter
-
-    def compute_fundamental_matrices(self, edges=[], walltime='00:10:00'):
-        return self.generic_cluster_submit('compute_fundamental_matrix', 
-                                           'acn_compute_fundamental_matrix',
-                                           edges=edges, walltime=walltime)
-
-
-    def ring_match(self, edges=[], walltime='01:00:00'):
-        return self.generic_cluster_submit('ring_match',
-                                           'acn_ring_match',
-                                           edges=edges, walltime=walltime)
-
-    def generic_callback(self, msg):
-        source = msg['sidx']
-        destination = msg['didx']
-        func = msg['task']
-
-        e = self.edges[source, destination]['data']
-        e.job_status[func]['success'] = msg['success']
-
-        # If the job was successful, no need to resubmit
-        if e.job_status[func]['success'] == True:
-            return
-
-        # Increment the parameter stepper to get the next parameter set
-        msg['param_step'] += 1
-
-        # Processing failed, and all parameter sets exhausted
-        if msg['param_step'] >= len(config['algorithms'][func]):
-            e.job_status[func]['param_step'] = msg['param_step']
-            return 
-        
-        # Update the message with the new parameter set
-        parameters = config['algorithms'][func][msg['param_step']]
-        for k, v in parameters.items():
-            msg[k] = v
-
-        # Push the updated message and resubmit
-        self.redis_queue.rpush(config['redis']['processing_queue'], json.dumps(msg))
-        getattr(self, func + '_callback')(msg)
-        
-    def compute_fundamental_matrix_callback(self, msg):
-        cmd = 'acn_compute_fundamental_matrix'
-        spawn(cmd, mem=config['cluster']['processing_memory'],
-                time=msg['walltime'], queue=config['cluster']['queue'], 
-                outdir=config['cluster']['cluster_log_dir']+'/slurm-%j.out',
-                env=config['python']['env_name'])
-
-    def ring_match_callback(self, msg):
-        cmd = 'acn_ring_match'
-        spawn(cmd, mem=config['cluster']['processing_memory'],
-                time=msg['walltime'], queue=config['cluster']['queue'],
-                outdir=config['cluster']['cluster_log_dir']+'/slurm-%j.out',
-                env=config['python']['env_name'])
 
     def create_network(self, nodes=[]):
         cmds = 0
@@ -540,6 +510,31 @@ AND i1.id < i2.id""".format(query_string)
         # Add nodes that do not overlap any images
         obj = cls.from_adjacency(adjacency, node_id_map=adjacency_lookup, config=config)
         return obj
+
+    @classmethod
+    def from_filelist(cls, filelist, basepath=None):
+        """
+        This methods instantiates a network candidate graph by first parsing
+        the filelist and adding those images to the database. This method then
+        dispatches to the from_database cls method to create the network
+        candidate graph object.
+        """
+        if isinstance(filelist, str):
+            filelist = io_utils.file_to_list(filelist)
+        
+        if basepath:
+            filelist = [(f, os.path.join(basepath, f)) for f in filelist]
+        else:
+            filelist = [(os.path.basename(f), f) for f in filelist]
+        
+        parent = Parent(config)
+        # Get each of the images added to the DB (duplicates, by PATH, are omitted)
+        for f in filelist:
+            n = NetworkNode(image_name=f[0], image_path=f[1], parent=parent)
+        pathlist = [f[1] for f in filelist]
+
+        qs = 'SELECT * FROM public.Images WHERE public.Images.path IN ({})'.format(','.join("'{0}'".format(p) for p in pathlist))
+        return NetworkCandidateGraph.from_database(query_string=qs)
 
 class AsynchronousQueueWatcher(threading.Thread):
 

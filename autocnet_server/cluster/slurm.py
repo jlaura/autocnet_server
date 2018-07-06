@@ -52,7 +52,7 @@ def spawn(command, name='AutoCNet', time='01:00:00', outdir='/home/jlaura/autocn
     #    pass
     return job_string
 
-def spawn_jobarr(command, njobs, name='AutoCNet', time='01:00:00',mem=2048, queue='shortall', outdir=r"slurm-%A_%a.out", env='root'):
+def spawn_jobarr(command, njobs, name='AutoCNet', time='01:00:00',mem=4096, queue='shortall', outdir=r"slurm-%A_%a.out", env='root'):
     
     process = subprocess.Popen(['sbatch', '--array', '1-{}'.format(njobs)],
                                 stdin=subprocess.PIPE,

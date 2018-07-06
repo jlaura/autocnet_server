@@ -1,7 +1,7 @@
 import datetime
 import os
 
-def create_output_path(ds, outdir):
+def create_output_path(ds, outdir=None):
     image_name = os.path.basename(ds.file_name)
     image_path = os.path.dirname(ds.file_name)
 

@@ -4,6 +4,12 @@ import sqlalchemy
 from sqlalchemy import create_engine
 from sqlalchemy.orm import create_session, scoped_session, sessionmaker
 
+
+class Parent:
+    def __init__(self, config):
+        self.session, _ = new_connection(config)
+        self.session.begin()
+
 def new_connection(config):
     """
     Using the user supplied config create a NullPool database connection.
