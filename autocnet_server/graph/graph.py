@@ -75,12 +75,14 @@ class NetworkNode(Node):
 
         if exists is False:
             # Create the camera entry
-            cam = create_camera(self.geodata)
-            cam = pickle.dumps(cam, 2)
+            self._camera = create_camera(self.geodata)
+            cam = pickle.dumps(self._camera, 2)
             cam = Cameras(camera=cam)
+            
+            kpspath = create_output_path(self.geodata)
 
             # Create the keypoints entry
-            kps = Keypoints(path=kwargs['image_path'], nkeypoints=0)
+            kps = Keypoints(path=kpspath, nkeypoints=0)
             
             # Create the image
             i = Images(name=kwargs['image_name'],
@@ -176,6 +178,7 @@ class NetworkNode(Node):
                 self._camera = pickle.loads(res.camera)
             else:
                 return None
+
         return self._camera
 
     @property
