@@ -30,8 +30,8 @@ def main(msg, config, parent=None):
         obj = NetworkNode(node_id=id, image_path=image_path)
     else:
         obj = NetworkEdge()
-        obj['source'] = NetworkNode(node_id=id[0], image_path=image_path[0])
-        obj['destination'] = NetworkNode(node_id=id[1], image_path=image_path[1])
+        obj.source = NetworkNode(node_id=id[0], image_path=image_path[0])
+        obj.destination = NetworkNode(node_id=id[1], image_path=image_path[1])
 
     # Patch in a DB session through the 'parent' since the NetworkObj classes
     # make use of a shared DB connection. Here we make a single connection

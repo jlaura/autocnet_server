@@ -72,7 +72,6 @@ class Matches(Base):
     source_y = Column(Float)
     destination_x = Column(Float)
     destination_y = Column(Float)
-    valid = Column(Boolean, default=True)
 
 
 class Cameras(Base):

@@ -18,6 +18,7 @@ from geoalchemy2.elements import WKTElement, WKBElement
 from shapely.geometry import Point
 import shapely
 
+import networkx as nx
 from networkx.classes.reportviews import NodeView, EdgeView
 import numpy as np
 import pandas as pd
@@ -235,6 +236,43 @@ class NetworkEdge(edge.Edge):
                       Matches.destination == self.destination['node_id'])
         return pd.read_sql(qf.statement, q.session.bind)
 
+    @matches.setter
+    def matches(self, v):
+        # What to do when the new matches DF comes in
+        # How does a DB update work since matches is out of the DB
+
+        to_db_add = []
+        to_db_update = []
+        # Get the query obj
+        q = self.parent.session.query(Matches)
+        for idx, row in v.iterrows():
+            # Determine if this is an update or the addition of a new row
+            if hasattr(row, 'id'):
+                res = q.filter(Matches.id == row.id).first()
+            else:
+                res = None
+            if res:
+                # update
+                mapping = {}
+                for index in row.index:
+                    row_val = row[index]
+                    if isinstance(row_val, (np.int,)):
+                        row_val = int(row_val)
+                    elif isinstance(row_val, (np.float,)):
+                        row_val = float(row_val)
+                    mapping[index] = row_val
+                to_db_update.append(mapping)
+            else:
+                match = Matches(source=int(row.source), source_idx=int(row.source_idx),
+                            destination=int(row.destination), destination_idx=int(row.destination_idx))
+                to_db_add.append(match)
+        
+        if to_db_add:
+            self.parent.session.bulk_save_objects(to_db_add)
+        if to_db_update:
+            self.parent.session.bulk_update_mappings(Matches, to_db_update)
+        self.parent.session.commit()
+
     @property
     def intersection(self):
         if not hasattr(self, '_intersection'):
@@ -345,12 +383,14 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
         for job_counter, elem in enumerate(onobj.data('data')):
             # Determine if we are working with an edge or a node
-            id = (elem[0])
-            image_path = elem[1]['image_path']
             if len(elem) > 2:
                 id = (elem[0], elem[1])
-                image_path = (image_path, elem[2]['image_path'])
-            
+                image_path = (elem[2].source['image_path'], 
+                              elem[2].destination['image_path'])
+            else:
+                id = (elem[0])
+                image_path = elem[1]['image_path']
+
             msg = {'id':id,
                     'func':function,
                     'args':args,
@@ -599,3 +639,12 @@ class AsynchronousFailedWatcher(threading.Thread):
                 callback_func = getattr(self.parent, 'generic_callback')
                 self.queue.lrem(self.name,0, json.dumps(msg))
                 self.parent.generic_callback(msg)
+
+class SubCandidateGraph(nx.graphviews.SubGraph, NetworkCandidateGraph):
+    def __init__(self, *args, **kwargs):
+        super(SubCandidateGraph, self).__init__(*args, **kwargs)
+        self._setup_db_connection()
+        self._setup_queues()
+        self.processing_queue = config['redis']['processing_queue']
+
+nx.graphviews.SubGraph = SubCandidateGraph
