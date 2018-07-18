@@ -55,7 +55,7 @@ from plio.camera.csm import create_camera
 from plio.utils import generate_vrt
 
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
-from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges
+from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges, Costs
 from autocnet_server.db.connection import new_connection, Parent
 from autocnet_server.utils.utils import slurm_walltime_to_seconds, create_output_path
 
@@ -229,6 +229,50 @@ class NetworkEdge(edge.Edge):
                filter(table_obj.source == self.source['node_id']).\
                filter(table_obj.destination == self.destination['node_id'])
 
+    def _commit_db(self):
+        try:
+            self.parent.session.commit()
+        except:
+            self.parent.session.begin()
+            self.parent.session.commit()
+
+    @property
+    def costs(self):
+        # these are np.float coming out, sqlalchemy needs ints
+        ids = map(int, self.matches.id.values)
+        q = self.parent.session.query(Costs).filter(Costs.match_id.in_(ids)).all()
+        if not q:
+            return pd.DataFrame(index=self.matches.id.values)
+        else:
+            data = {r.match_id:json.loads(r.cost) for r in q}
+            return pd.DataFrame.from_dict(data, orient='index')
+            
+
+    @costs.setter
+    def costs(self, v):
+        to_db_add = []
+        to_db_update = []
+        # Get the query obj
+
+        q = self.parent.session.query(Costs)
+        for idx, row in v.iterrows():
+            res = q.filter(Costs.id == idx).first()
+            if res:
+                #update
+                costs_existing = res.cost
+                costs_new = {**costs_existing, **row.to_json()}
+                mapping = {'costs':costs_new}
+                to_db_update.append(mapping)
+            else:
+                cost = Costs(match_id=idx, cost=row.to_json())
+                to_db_add.append(cost)
+        if to_db_add:
+            self.parent.session.bulk_save_objects(to_db_add)
+        if to_db_update:
+            self.parent.session.bulk_update_mappings(Matches, to_db_update)
+        self._commit_db() 
+
+
     @property
     def matches(self):
         q = self.parent.session.query(Matches)
@@ -238,9 +282,6 @@ class NetworkEdge(edge.Edge):
 
     @matches.setter
     def matches(self, v):
-        # What to do when the new matches DF comes in
-        # How does a DB update work since matches is out of the DB
-
         to_db_add = []
         to_db_update = []
         # Get the query obj
@@ -260,6 +301,8 @@ class NetworkEdge(edge.Edge):
                         row_val = int(row_val)
                     elif isinstance(row_val, (np.float,)):
                         row_val = float(row_val)
+                    elif isinstance(row_val, WKBElement):
+                        continue
                     mapping[index] = row_val
                 to_db_update.append(mapping)
             else:
@@ -271,7 +314,29 @@ class NetworkEdge(edge.Edge):
             self.parent.session.bulk_save_objects(to_db_add)
         if to_db_update:
             self.parent.session.bulk_update_mappings(Matches, to_db_update)
-        self.parent.session.commit()
+        self._commit_db()
+
+    @property 
+    def ring(self):
+        res = self._from_db(Edges).first()
+        if res:
+            return res.ring
+        return
+
+    @ring.setter
+    def ring(self, ring):
+        res = self._from_db(Edges).first()
+        if res:
+            res.ring = ring
+        else:
+            edge = Edges(source=self.source['node_id'],
+                         destination=self.destination['node_id'],
+                         ring=ring)
+            self.parent.session.add(edge)
+        self._commit_db()
+        return
+
+
 
     @property
     def intersection(self):
@@ -287,11 +352,11 @@ class NetworkEdge(edge.Edge):
 
     def get_overlapping_indices(self, kps):
         ecef = pyproj.Proj(proj='geocent',
-			   a=self.parent.config['spatial']['semimajor_rad'],
-			   b=self.parent.config['spatial']['semiminor_rad'])
+			               a=self.parent.config['spatial']['semimajor_rad'],
+			               b=self.parent.config['spatial']['semiminor_rad'])
         lla = pyproj.Proj(proj='longlat',
-			  a=self.parent.config['spatial']['semiminor_rad'],
-			  b=self.parent.config['spatial']['.semimajor_rad'])
+			              a=self.parent.config['spatial']['semiminor_rad'],
+			              b=self.parent.config['spatial']['.semimajor_rad'])
         lons, lats, alts = pyproj.transform(ecef, lla, kps.xm.values, kps.ym.values, kps.zm.values)
         points = [Point(lons[i], lats[i]) for i in range(len(lons))]
         mask = [i for i in range(len(points)) if self.intersection.contains(points[i])]
@@ -333,7 +398,8 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
         # TODO: This adds the tables to the db if they do not exist already
         Base.metadata.bind = self._engine
-        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__, Edges.__table__])
+        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__,
+                                         Edges.__table__, Costs.__table__])
 
     def _setup_queues(self):
         """

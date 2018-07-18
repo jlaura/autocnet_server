@@ -2,7 +2,7 @@ import json
 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, String, Integer, Float, ForeignKey, Boolean, LargeBinary, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSON
 from sqlalchemy.orm import relationship, backref
 from geoalchemy2 import Geometry
 from geoalchemy2.shape import to_shape
@@ -58,6 +58,12 @@ class Edges(Base):
     fundamental = Column(ARRAY(Float, dimensions=2))
     active = Column(Boolean)
 
+class Costs(Base):
+    __tablename__ = 'costs'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(Integer, ForeignKey("matches.id", ondelete="CASCADE"))
+    cost = Column(JSON)
+
 class Matches(Base):
     __tablename__ = 'matches'
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -72,6 +78,8 @@ class Matches(Base):
     source_y = Column(Float)
     destination_x = Column(Float)
     destination_y = Column(Float)
+    shift_x = Column(Float)
+    shift_y = Column(Float)
 
 
 class Cameras(Base):
