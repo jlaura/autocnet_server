@@ -334,9 +334,7 @@ class NetworkEdge(edge.Edge):
                          ring=ring)
             self.parent.session.add(edge)
         self._commit_db()
-        return
-
-
+        return        
 
     @property
     def intersection(self):
@@ -348,7 +346,19 @@ class NetworkEdge(edge.Edge):
     
     @property
     def fundamental_matrix(self):
-        return self._from_db(Edges).first().fundamental
+        res = self._from_db(Edges).first()
+        if res:
+            return res.fundamental
+        
+    @fundamental_matrix.setter
+    def fundamental_matrix(self, v):
+        res = self._from_db(Edges).first()
+        if res:
+            res.fundamental = v
+        else:
+            edge = Edges(source=self.source['node_id'],
+                         destination=self.destination['node_id'],
+                         fundamental = v)
 
     def get_overlapping_indices(self, kps):
         ecef = pyproj.Proj(proj='geocent',
