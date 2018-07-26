@@ -13,12 +13,12 @@ services:
   admin:
       image: thajeztah/pgadmin4
       ports:
-        - "308004:5050"
+        - "38004:5050"
 
   pgbouncer:
       image: brainsam/pgbouncer
       ports:
-        - "308003:6543"
+        - "38003:6543"
       volumes:
         - "./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini"
         - "./users.txt:/etc/pgbouncer/users.txt"
@@ -29,4 +29,4 @@ services:
       volumes:
            - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
       ports:
-          - "308000:6379"
+          - "38000:6379"
