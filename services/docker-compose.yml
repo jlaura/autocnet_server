@@ -2,31 +2,31 @@ version: "3"
 services:
   db:
     image: mdillon/postgis:9.6-alpine
-    environment: 
+    environment:
       POSTGRES_PASSWORD: abcde
       POSTGRES_USER: jay
       POSTGRES_DB: kaguyasp
-    volumes: 
+    volumes:
       - "${AUTOCNET_SERVER_DB}:/var/lib/postgresql/data"
     command: -c shared_buffers=8GB -c max_connections=250
 
   admin:
       image: thajeztah/pgadmin4
       ports:
-        - "38004:5050"
+        - "8082:5050"
 
   pgbouncer:
       image: brainsam/pgbouncer
       ports:
-        - "38003:6543"
+        - "8083:6543"
       volumes:
         - "./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini"
         - "./users.txt:/etc/pgbouncer/users.txt"
-  
+
   redis:
       image: redis:4.0.8-alpine
       command: redis-server /usr/local/etc/redis/redis.conf
       volumes:
            - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
       ports:
-          - "38000:6379"
+          - "8084:6379"
