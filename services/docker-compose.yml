@@ -2,8 +2,6 @@ version: "3"
 services:
   db:
     image: mdillon/postgis:9.6-alpine
-    ports:
-        - "8082:5432"
     environment:
       POSTGRES_PASSWORD: abcde
       POSTGRES_USER: jay
@@ -15,12 +13,12 @@ services:
   admin:
       image: thajeztah/pgadmin4
       ports:
-        - "8083:5050"
+        - "8082:5050"
 
   pgbouncer:
       image: brainsam/pgbouncer
       ports:
-        - "8084:6543"
+        - "8083:6543"
       volumes:
         - "./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini"
         - "./users.txt:/etc/pgbouncer/users.txt"
@@ -31,4 +29,4 @@ services:
       volumes:
            - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
       ports:
-          - "8085:6379"
+          - "8084:6379"
