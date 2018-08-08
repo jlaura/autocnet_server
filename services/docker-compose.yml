@@ -1,4 +1,5 @@
-version: "3"
+version: "3.3"
+
 services:
   db:
     image: mdillon/postgis:9.6-alpine
@@ -11,22 +12,33 @@ services:
     command: -c shared_buffers=8GB -c max_connections=250
 
   admin:
-      image: thajeztah/pgadmin4
-      ports:
-        - "8082:5050"
+    image: thajeztah/pgadmin4
+    ports:
+     - "8082:5050"
 
   pgbouncer:
-      image: brainsam/pgbouncer
-      ports:
-        - "8083:6543"
-      volumes:
-        - "./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini"
-        - "./users.txt:/etc/pgbouncer/users.txt"
+    image: brainsam/pgbouncer
+    ports:
+      - "8083:6543"
+    configs:
+      - source: pgbouncer.ini
+        target: /etc/pgbouncer/pgbouncer.ini
+      - source: users.txt
+        target: /etc/pgbouncer/users.txt
 
   redis:
-      image: redis:4.0.8-alpine
-      command: redis-server /usr/local/etc/redis/redis.conf
-      volumes:
-           - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
-      ports:
-          - "8084:6379"
+    image: redis:4.0.8-alpine
+    command: redis-server /usr/local/etc/redis/redis.conf
+    configs:
+      - source: redis.conf
+        target: /usr/local/etc/redis/redis.conf
+    ports:
+      - "8084:6379"
+
+configs:
+  pgbouncer.ini:
+    file: ./pgbouncer.ini
+  users.txt:
+    file: ./users.txt
+  redis.conf:
+    file: ./redis/redis.conf
