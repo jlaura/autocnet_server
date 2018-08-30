@@ -12,6 +12,7 @@ from sqlalchemy.orm import aliased, create_session, scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy import create_engine, func
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm.attributes import flag_modified
 
 from geoalchemy2.shape import to_shape, from_shape
 from geoalchemy2.elements import WKTElement, WKBElement
@@ -43,21 +44,20 @@ asp = config.get('developer', {}).get('autocnet_server_path', None)
 if asp:
     sys.path.insert(0, asp)
 
-from plio.camera.csm import create_camera
-
 from autocnet.graph import node, network, edge
 from autocnet.graph.node import Node
 from autocnet.utils import utils
 from autocnet.io import keypoints as io_keypoints
 from autocnet.transformation.fundamental_matrix import compute_reprojection_error
 
-from plio.camera.csm import create_camera
 from plio.utils import generate_vrt
 
 from autocnet_server.cluster.slurm import spawn, spawn_jobarr
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges, Costs
 from autocnet_server.db.connection import new_connection, Parent
+from autocnet_server.db.wrappers import DbDataFrame
 from autocnet_server.utils.utils import slurm_walltime_to_seconds, create_output_path
+from autocnet_server.sensors.csm import create_camera
 
 class NetworkNode(Node):
     def __init__(self, *args, parent=None, **kwargs):
@@ -76,9 +76,12 @@ class NetworkNode(Node):
 
         if exists is False:
             # Create the camera entry
-            self._camera = create_camera(self.geodata)
-            cam = pickle.dumps(self._camera, 2)
-            cam = Cameras(camera=cam)
+            try:
+                self._camera = create_camera(self.geodata)
+                cam = pickle.dumps(self._camera, 2)
+                cam = Cameras(camera=cam)
+            except:
+                cam = None
             
             kpspath = create_output_path(self.geodata)
 
@@ -186,9 +189,12 @@ class NetworkNode(Node):
     def footprint(self):
         res = self.parent.session.query(Images).filter(Images.id == self['node_id']).first()
         if res is None:
-            footprint_latlon = footprint.generate_latlon_footprint(self.camera)
-            footprint_latlon = footprint_latlon.ExportToWkt()
-            footprint_latlon = WKTElement(footprint_latlon, srid=config['spatial']['srid'])
+            try:
+                footprint_latlon = footprint.generate_latlon_footprint(self.camera)
+                footprint_latlon = footprint_latlon.ExportToWkt()
+                footprint_latlon = WKTElement(footprint_latlon, srid=config['spatial']['srid'])
+            except:
+                footprint_latlon = None
         else:
             footprint_latlon = to_shape(res.footprint_latlon)
         return footprint_latlon
@@ -236,65 +242,134 @@ class NetworkEdge(edge.Edge):
             self.parent.session.begin()
             self.parent.session.commit()
 
+    @property 
+    def masks(self):
+        res = self.parent.session.query(Edges.masks).\
+                                        filter(Edges.source == self.source['node_id']).\
+                                        filter(Edges.destination == self.destination['node_id']).\
+                                        first()[0]
+        
+        if res:
+            df = pd.DataFrame.from_records(res)
+            df.index = df.index.map(int)
+        else:
+            ids = list(map(int, self.matches.index.values))
+            df = pd.DataFrame(index=ids)
+        df.index.name = 'match_id'
+        return DbDataFrame(df, parent=self, name='masks')
+
+    @masks.setter
+    def masks(self, v):
+
+        def dict_check(input):
+            for k, v in input.items():
+                if isinstance(v, dict):
+                    dict_check(v)
+                elif v is None:
+                    continue
+                elif np.isnan(v):
+                    input[k] = None
+            
+
+        df = pd.DataFrame(v)
+        res = self.parent.session.query(Edges).\
+                                filter(Edges.source == self.source['node_id']).\
+                                filter(Edges.destination == self.destination['node_id']).first()
+        if res:
+            as_dict = df.to_dict()
+            dict_check(as_dict)
+            # Update the masks
+            res.masks = as_dict
+            self.parent.session.add(res)
+            self._commit_db()
+
     @property
     def costs(self):
         # these are np.float coming out, sqlalchemy needs ints
-        ids = map(int, self.matches.id.values)
-        q = self.parent.session.query(Costs).filter(Costs.match_id.in_(ids)).all()
-        if not q:
-            return pd.DataFrame(index=self.matches.id.values)
+        ids = list(map(int, self.matches.index.values))
+        res = self.parent.session.query(Costs).filter(Costs.match_id.in_(ids)).all()
+        #qf = q.filter(Costs.match_id.in_(ids))
+        
+        if res:
+        # Parse the JSON dicts in the cost field into a full dimension dataframe
+            costs = {r.match_id:r._cost for r in res}
+            df = pd.DataFrame.from_records(costs).T  # From records is important because from_dict drops rows with empty dicts
         else:
-            data = {r.match_id:json.loads(r.cost) for r in q}
-            return pd.DataFrame.from_dict(data, orient='index')
-            
+            df = pd.DataFrame(index=ids)
+
+        df.index.name = 'match_id'
+        return DbDataFrame(df, parent=self, name='costs')
+
 
     @costs.setter
     def costs(self, v):
         to_db_add = []
-        to_db_update = []
         # Get the query obj
-
         q = self.parent.session.query(Costs)
-        for idx, row in v.iterrows():
-            res = q.filter(Costs.id == idx).first()
+        # Need the new instance here to avoid __setattr__ issues
+        df = pd.DataFrame(v)
+        for idx, row in df.iterrows():
+            # Now invert the expanded dict back into a single JSONB column for storage
+            res = q.filter(Costs.match_id == idx).first()
             if res:
-                #update
-                costs_existing = res.cost
-                costs_new = {**costs_existing, **row.to_json()}
-                mapping = {'costs':costs_new}
-                to_db_update.append(mapping)
+                #update the JSON blob
+                costs_new_or_updated = row.to_dict()
+                for k, v in costs_new_or_updated.items():
+                    if v is None:
+                        continue
+                    elif np.isnan(v):
+                        v = None
+                    res._cost[k] = v
+                flag_modified(res, '_cost')
+                self.parent.session.add(res)
+                self._commit_db()
             else:
-                cost = Costs(match_id=idx, cost=row.to_json())
+                row = row.to_dict()
+                costs = row.pop('_costs', {})
+                for k, v in row.items():
+                    if np.isnan(v):
+                        v = None
+                    costs[k] = v
+                cost = Costs(match_id=idx, _cost=costs)
                 to_db_add.append(cost)
         if to_db_add:
             self.parent.session.bulk_save_objects(to_db_add)
-        if to_db_update:
-            self.parent.session.bulk_update_mappings(Matches, to_db_update)
-        self._commit_db() 
-
+        self._commit_db()
 
     @property
     def matches(self):
         q = self.parent.session.query(Matches)
         qf = q.filter(Matches.source == self.source['node_id'],
                       Matches.destination == self.destination['node_id'])
-        return pd.read_sql(qf.statement, q.session.bind)
+        odf = pd.read_sql(qf.statement, q.session.bind).set_index('id')
+        df = pd.DataFrame(odf.values, index=odf.index.values, columns=odf.columns.values)
+        df.index.name = 'id'
+        return DbDataFrame(df, 
+                           parent=self,
+                           name='matches')
 
     @matches.setter
     def matches(self, v):
         to_db_add = []
         to_db_update = []
+        df = pd.DataFrame(v)
+        df.index.name = v.index.name
         # Get the query obj
         q = self.parent.session.query(Matches)
-        for idx, row in v.iterrows():
+        for idx, row in df.iterrows():
             # Determine if this is an update or the addition of a new row
             if hasattr(row, 'id'):
                 res = q.filter(Matches.id == row.id).first()
+                match_id = row.id
+            elif v.index.name == 'id':
+                res = q.filter(Matches.id == row.name).first()
+                match_id = row.name
             else:
                 res = None
             if res:
                 # update
                 mapping = {}
+                mapping['id'] = match_id
                 for index in row.index:
                     row_val = row[index]
                     if isinstance(row_val, (np.int,)):
@@ -309,7 +384,6 @@ class NetworkEdge(edge.Edge):
                 match = Matches(source=int(row.source), source_idx=int(row.source_idx),
                             destination=int(row.destination), destination_idx=int(row.destination_idx))
                 to_db_add.append(match)
-        
         if to_db_add:
             self.parent.session.bulk_save_objects(to_db_add)
         if to_db_update:
@@ -400,7 +474,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
                                                       config['database']['database_password'],
                                                       config['database']['database_host'],
-                                                      config['database']['database_port'],
+                                                      config['database']['pgbouncer_port'],
                                                       config['database']['database_name'])
         self._engine = create_engine(db_uri, pool_size=2)
         #self._connection = self._engine.connect()
@@ -409,7 +483,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         # TODO: This adds the tables to the db if they do not exist already
         Base.metadata.bind = self._engine
         Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__,
-                                         Edges.__table__, Costs.__table__])
+                                         Edges.__table__, Costs.__table__, Matches.__table__])
 
     def _setup_queues(self):
         """
@@ -435,6 +509,14 @@ class NetworkCandidateGraph(network.CandidateGraph):
         s = AsynchronousFailedWatcher(self, self.redis_queue, config['redis']['working_queue'])
         s.setDaemon(True)
         s.start()
+
+    def empty_queues(self):
+        """
+        Delete all messages from the redis queue. This a convenience method. 
+        The `redis_queue` object is a redis-py StrictRedis object with API
+        documented at: https://redis-py.readthedocs.io/en/latest/#redis.StrictRedis
+        """
+        return self.redis_queue.flushall()
 
     def apply(self, function, on='edge',out=None, args=(), walltime='01:00:00', **kwargs):
     

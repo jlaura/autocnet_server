@@ -1,0 +1,22 @@
+name: autocnet_server
+dependencies:
+    - pandas
+    - numpy
+    # Sensor Models
+    - libcsm
+    - csmapi
+    - usgscam
+    # Data structures
+    - networkx
+    # Data Storage/IO
+    - redis
+    - yaml
+    - sqlalchemy
+    # Spatial
+    - libgdal
+    - gdal
+    - plio
+    - pyproj
+    - shapely 
+    - geoalchemy2
+

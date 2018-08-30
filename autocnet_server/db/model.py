@@ -2,7 +2,7 @@ import json
 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, String, Integer, Float, ForeignKey, Boolean, LargeBinary, UniqueConstraint
-from sqlalchemy.dialects.postgresql import ARRAY, JSON
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import relationship, backref
 from geoalchemy2 import Geometry
 from geoalchemy2.shape import to_shape
@@ -57,12 +57,12 @@ class Edges(Base):
     ring = Column(ARRAY(Float))
     fundamental = Column(ARRAY(Float, dimensions=2))
     active = Column(Boolean)
+    masks = Column(JSONB)
 
 class Costs(Base):
     __tablename__ = 'costs'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    match_id = Column(Integer, ForeignKey("matches.id", ondelete="CASCADE"))
-    cost = Column(JSON)
+    match_id = Column(Integer, ForeignKey("matches.id", ondelete="CASCADE"), primary_key=True)
+    _cost = Column(JSONB)
 
 class Matches(Base):
     __tablename__ = 'matches'
@@ -80,6 +80,8 @@ class Matches(Base):
     destination_y = Column(Float)
     shift_x = Column(Float)
     shift_y = Column(Float)
+    original_destination_x = Column(Float)
+    original_destination_y = Column(Float)
 
 
 class Cameras(Base):
@@ -96,8 +98,8 @@ class Images(Base):
     name = Column(String, unique=True)
     path = Column(String, unique=True)
     active = Column(Boolean)
-    footprint_latlon = Column(Geometry('POLYGONZ', srid=949900, dimension=3, spatial_index=True))
-    footprint_bodyfixed = Column(Geometry('POLYGONZ', dimension=3))
+    footprint_latlon = Column(Geometry('MULTIPOLYGONZ', srid=949900, dimension=3, spatial_index=True))
+    footprint_bodyfixed = Column(Geometry('MULTIPOLYGONZ', dimension=3))
     #footprint_bodyfixed = Column(Geometry('POLYGON',dimension=3))
 
     # Relationships
