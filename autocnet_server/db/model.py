@@ -88,7 +88,7 @@ class Cameras(Base):
     __tablename__ = 'cameras'
     id = Column(Integer, primary_key=True, autoincrement=True)
     image_id = Column(Integer, ForeignKey("images.id", ondelete="CASCADE"), unique=True)
-    camera = Column(LargeBinary)
+    camera = Column(JSONB)
 
 
 class Images(Base):
