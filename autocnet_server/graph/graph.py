@@ -23,7 +23,6 @@ import networkx as nx
 from networkx.classes.reportviews import NodeView, EdgeView
 import numpy as np
 import pandas as pd
-from plio.spatial import footprint
 from plio.utils import utils as io_utils
 import pyproj
 
@@ -57,7 +56,7 @@ from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Networ
 from autocnet_server.db.connection import new_connection, Parent
 from autocnet_server.db.wrappers import DbDataFrame
 from autocnet_server.utils.utils import slurm_walltime_to_seconds, create_output_path
-from autocnet_server.sensors.csm import create_camera
+from autocnet_server.sensors.csm import create_camera, generate_latlon_footprint
 
 class NetworkNode(Node):
     def __init__(self, *args, parent=None, **kwargs):
@@ -73,21 +72,19 @@ class NetworkNode(Node):
             exists = True
             kwargs['node_id'] = res.id
         super(NetworkNode, self).__init__(*args, **kwargs)
-
+        
         if exists is False:
             # Create the camera entry
             try:
                 self._camera = create_camera(self.geodata)
-                cam = pickle.dumps(self._camera, 2)
-                cam = Cameras(camera=cam)
+                serialized_camera = self._camera.getModelState()
+                cam = Cameras(camera=serialized_camera)
             except:
                 cam = None
-            
             kpspath = create_output_path(self.geodata)
 
             # Create the keypoints entry
             kps = Keypoints(path=kpspath, nkeypoints=0)
-            
             # Create the image
             i = Images(name=kwargs['image_name'],
                        path=kwargs['image_path'],
@@ -176,21 +173,19 @@ class NetworkNode(Node):
         """
         Get the camera object from the database.
         """
-        if not hasattr(self, '_camera'):
+        if not getattr(self, '_camera', None):
             res = self._from_db(Cameras)
             if res is not None:
-                self._camera = pickle.loads(res.camera)
-            else:
-                return None
-
+                plugin = csmapi.Plugin.findPlugin('USGS_ASTRO_LINE_SCANNER_PLUGIN')
+                self._camera = plugin.constructModelFromState(res.camera)
         return self._camera
-
+    
     @property
     def footprint(self):
         res = self.parent.session.query(Images).filter(Images.id == self['node_id']).first()
         if res is None:
             try:
-                footprint_latlon = footprint.generate_latlon_footprint(self.camera)
+                footprint_latlon = generate_latlon_footprint(self.camera)
                 footprint_latlon = footprint_latlon.ExportToWkt()
                 footprint_latlon = WKTElement(footprint_latlon, srid=config['spatial']['srid'])
             except:
@@ -483,7 +478,8 @@ class NetworkCandidateGraph(network.CandidateGraph):
         # TODO: This adds the tables to the db if they do not exist already
         Base.metadata.bind = self._engine
         Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__,
-                                         Edges.__table__, Costs.__table__, Matches.__table__])
+                                         Edges.__table__, Costs.__table__, Matches.__table__,
+                                         Cameras.__table__])
 
     def _setup_queues(self):
         """
@@ -652,7 +648,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                     env=config['python']['env_name'])
 
     @classmethod
-    def from_database(cls, query_string='SELECT * FROM public.Images'):
+    def from_database(cls, query_string='SELECT * FROM public.images'):
         """
         This is a constructor that takes the results from an arbitrary query string,
         uses those as a subquery into a standard polygon overlap query and
@@ -676,7 +672,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
         (SRID), 949900.
 
         "SELECT * FROM Images WHERE ST_INTERSECTS(footprint_latlon, ST_Polygon(ST_GeomFromText('LINESTRING(159 10, 159 11, 160 11, 160 10, 159 10)'),949900)) = TRUE"
-
+from_database
         ## Select from a specific orbit
         This example selects those images that are from a particular orbit. In this case,
         the regex string pulls all P##_* orbits and creates a graph from them. This method
