@@ -8,17 +8,14 @@ import sys
 import time
 import threading
 
-from sqlalchemy.orm import aliased, create_session, scoped_session, sessionmaker
-from sqlalchemy.pool import NullPool
-from sqlalchemy import create_engine, func
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm.attributes import flag_modified
+import sqlalchemy
 
 from geoalchemy2.shape import to_shape, from_shape
 from geoalchemy2.elements import WKTElement, WKBElement
 from shapely.geometry import Point
 import shapely
 
+import csmapi
 import networkx as nx
 from networkx.classes.reportviews import NodeView, EdgeView
 import numpy as np
@@ -51,12 +48,13 @@ from autocnet.transformation.fundamental_matrix import compute_reprojection_erro
 
 from plio.utils import generate_vrt
 
-from autocnet_server.cluster.slurm import spawn, spawn_jobarr
+from plurmy import spawn, spawn_jobarr, slurm_walltime_to_seconds
+from autocnet_server import Session, engine
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges, Costs
 from autocnet_server.db.connection import new_connection, Parent
 from autocnet_server.db.wrappers import DbDataFrame
-from autocnet_server.utils.utils import slurm_walltime_to_seconds, create_output_path
 from autocnet_server.sensors.csm import create_camera, generate_latlon_footprint
+
 
 class NetworkNode(Node):
     def __init__(self, *args, parent=None, **kwargs):
@@ -65,12 +63,16 @@ class NetworkNode(Node):
             self.parent = Parent(config)
         else:
             self.parent = parent
+        
+        # Create a session to work in
+        session = Session()
         # For now, just use the PATH to determine if the node/image is in the DB
-        res = self.parent.session.query(Images).filter(Images.path == kwargs['image_path']).first()
+        res = session.query(Images).filter(Images.path == kwargs['image_path']).first()
         exists = False
         if res:
             exists = True
             kwargs['node_id'] = res.id
+        session.close()
         super(NetworkNode, self).__init__(*args, **kwargs)
         
         if exists is False:
@@ -81,7 +83,7 @@ class NetworkNode(Node):
                 cam = Cameras(camera=serialized_camera)
             except:
                 cam = None
-            kpspath = create_output_path(self.geodata)
+            kpspath = io_keypoints.create_output_path(self.geodata)
 
             # Create the keypoints entry
             kps = Keypoints(path=kpspath, nkeypoints=0)
@@ -90,14 +92,10 @@ class NetworkNode(Node):
                        path=kwargs['image_path'],
                        footprint_latlon=self.footprint,
                        cameras=cam, keypoints=kps)
-            self.parent.session.add(i)
-            try:
-                self.parent.session.commit()
-            except:
-                self.parent.session.begin()
-                self.parent.session.commit()
-
-        
+            session = Session()
+            session.add(i)
+            session.commit()
+            session.close()
         self.job_status = defaultdict(dict)
 
     def _from_db(self, table_obj, key='image_id'):
@@ -118,7 +116,10 @@ class NetworkNode(Node):
         """
         if 'node_id' not in self.keys():
             return
-        return self.parent.session.query(table_obj).filter(getattr(table_obj,key) == self['node_id']).first()
+        session = Session()
+        res = session.query(table_obj).filter(getattr(table_obj,key) == self['node_id']).first()
+        session.close()
+        return res
 
     @property
     def keypoint_file(self):
@@ -136,17 +137,15 @@ class NetworkNode(Node):
             
     @keypoints.setter
     def keypoints(self, kps):
+        session = Session()
         io_keypoints.to_hdf(self.keypoint_file, keypoints=kps)
-        res = self._from_db(Keypoints)
+        res = session.query(Keypoints).filter(getattr(Keypoints,'image_id') == self['node_id']).first()
+
         if res is None:
             _ = self.keypoint_file
             res = self._from_db(Keypoints)
         res.nkeypoints = len(kps)
-        try:
-            self.parent.session.commit()
-        except:
-            self.parent.session.begin()
-            self.parent.session.commit()
+        session.commit()
 
     @property
     def descriptors(self):
@@ -182,7 +181,8 @@ class NetworkNode(Node):
     
     @property
     def footprint(self):
-        res = self.parent.session.query(Images).filter(Images.id == self['node_id']).first()
+        
+        res = Session().query(Images).filter(Images.id == self['node_id']).first()
         if res is None:
             try:
                 footprint_latlon = generate_latlon_footprint(self.camera)
@@ -226,26 +226,22 @@ class NetworkEdge(edge.Edge):
         table_obj : object
                     The declared table class (from db.model)
         """
-        return self.parent.session.query(table_obj).\
+        session = Session()
+        res = session.query(table_obj).\
                filter(table_obj.source == self.source['node_id']).\
                filter(table_obj.destination == self.destination['node_id'])
-
-    def _commit_db(self):
-        try:
-            self.parent.session.commit()
-        except:
-            self.parent.session.begin()
-            self.parent.session.commit()
+        session.close()
+        return res
 
     @property 
     def masks(self):
-        res = self.parent.session.query(Edges.masks).\
+        res = Session().query(Edges.masks).\
                                         filter(Edges.source == self.source['node_id']).\
                                         filter(Edges.destination == self.destination['node_id']).\
-                                        first()[0]
+                                        first()
         
         if res:
-            df = pd.DataFrame.from_records(res)
+            df = pd.DataFrame.from_records(res[0])
             df.index = df.index.map(int)
         else:
             ids = list(map(int, self.matches.index.values))
@@ -267,7 +263,8 @@ class NetworkEdge(edge.Edge):
             
 
         df = pd.DataFrame(v)
-        res = self.parent.session.query(Edges).\
+        session = Session()
+        res = session.query(Edges).\
                                 filter(Edges.source == self.source['node_id']).\
                                 filter(Edges.destination == self.destination['node_id']).first()
         if res:
@@ -275,14 +272,14 @@ class NetworkEdge(edge.Edge):
             dict_check(as_dict)
             # Update the masks
             res.masks = as_dict
-            self.parent.session.add(res)
-            self._commit_db()
+            session.add(res)
+            session.commit()
 
     @property
     def costs(self):
         # these are np.float coming out, sqlalchemy needs ints
         ids = list(map(int, self.matches.index.values))
-        res = self.parent.session.query(Costs).filter(Costs.match_id.in_(ids)).all()
+        res = Session().query(Costs).filter(Costs.match_id.in_(ids)).all()
         #qf = q.filter(Costs.match_id.in_(ids))
         
         if res:
@@ -300,7 +297,8 @@ class NetworkEdge(edge.Edge):
     def costs(self, v):
         to_db_add = []
         # Get the query obj
-        q = self.parent.session.query(Costs)
+        session = Session()
+        q = session.query(Costs)
         # Need the new instance here to avoid __setattr__ issues
         df = pd.DataFrame(v)
         for idx, row in df.iterrows():
@@ -315,9 +313,9 @@ class NetworkEdge(edge.Edge):
                     elif np.isnan(v):
                         v = None
                     res._cost[k] = v
-                flag_modified(res, '_cost')
-                self.parent.session.add(res)
-                self._commit_db()
+                sqlalchemy.orm.attributes.flag_modified(res, '_cost')
+                session.add(res)
+                session.commit()
             else:
                 row = row.to_dict()
                 costs = row.pop('_costs', {})
@@ -328,17 +326,20 @@ class NetworkEdge(edge.Edge):
                 cost = Costs(match_id=idx, _cost=costs)
                 to_db_add.append(cost)
         if to_db_add:
-            self.parent.session.bulk_save_objects(to_db_add)
-        self._commit_db()
+            session.bulk_save_objects(to_db_add)
+        session.commit()
 
     @property
     def matches(self):
-        q = self.parent.session.query(Matches)
+        session = Session()
+        q = session.query(Matches)
         qf = q.filter(Matches.source == self.source['node_id'],
                       Matches.destination == self.destination['node_id'])
         odf = pd.read_sql(qf.statement, q.session.bind).set_index('id')
         df = pd.DataFrame(odf.values, index=odf.index.values, columns=odf.columns.values)
         df.index.name = 'id'
+        # Explicit close to get the session cleaned up
+        session.close()
         return DbDataFrame(df, 
                            parent=self,
                            name='matches')
@@ -350,7 +351,8 @@ class NetworkEdge(edge.Edge):
         df = pd.DataFrame(v)
         df.index.name = v.index.name
         # Get the query obj
-        q = self.parent.session.query(Matches)
+        session = Session()
+        q = session.query(Matches)
         for idx, row in df.iterrows():
             # Determine if this is an update or the addition of a new row
             if hasattr(row, 'id'):
@@ -380,10 +382,10 @@ class NetworkEdge(edge.Edge):
                             destination=int(row.destination), destination_idx=int(row.destination_idx))
                 to_db_add.append(match)
         if to_db_add:
-            self.parent.session.bulk_save_objects(to_db_add)
+            session.bulk_save_objects(to_db_add)
         if to_db_update:
-            self.parent.session.bulk_update_mappings(Matches, to_db_update)
-        self._commit_db()
+            session.bulk_update_mappings(Matches, to_db_update)
+        session.commit()
 
     @property 
     def ring(self):
@@ -394,15 +396,20 @@ class NetworkEdge(edge.Edge):
 
     @ring.setter
     def ring(self, ring):
-        res = self._from_db(Edges).first()
+        # Setters need a single session and so should not make use of the
+        # syntax sugar _from_db
+        session = Session()
+        res = session.query(Edges).\
+               filter(Edges.source == self.source['node_id']).\
+               filter(Edges.destination == self.destination['node_id']).first()
         if res:
             res.ring = ring
         else:
             edge = Edges(source=self.source['node_id'],
                          destination=self.destination['node_id'],
                          ring=ring)
-            self.parent.session.add(edge)
-        self._commit_db()
+            session.add(edge)
+            session.commit()
         return        
 
     @property
@@ -421,13 +428,18 @@ class NetworkEdge(edge.Edge):
         
     @fundamental_matrix.setter
     def fundamental_matrix(self, v):
-        res = self._from_db(Edges).first()
+        session = Session()
+        res = session.query(table_obj).\
+               filter(table_obj.source == self.source['node_id']).\
+               filter(table_obj.destination == self.destination['node_id']).first()
         if res:
             res.fundamental = v
         else:
             edge = Edges(source=self.source['node_id'],
                          destination=self.destination['node_id'],
                          fundamental = v)
+            session.add(edge)
+            session.commit()
 
     def get_overlapping_indices(self, kps):
         ecef = pyproj.Proj(proj='geocent',
@@ -435,7 +447,7 @@ class NetworkEdge(edge.Edge):
 			               b=self.parent.config['spatial']['semiminor_rad'])
         lla = pyproj.Proj(proj='longlat',
 			              a=self.parent.config['spatial']['semiminor_rad'],
-			              b=self.parent.config['spatial']['.semimajor_rad'])
+			              b=self.parent.config['spatial']['semimajor_rad'])
         lons, lats, alts = pyproj.transform(ecef, lla, kps.xm.values, kps.ym.values, kps.zm.values)
         points = [Point(lons[i], lats[i]) for i in range(len(lons))]
         mask = [i for i in range(len(points)) if self.intersection.contains(points[i])]
@@ -448,7 +460,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
 
     def __init__(self, *args, **kwargs):
         super(NetworkCandidateGraph, self).__init__(*args, **kwargs)
-        self._setup_db_connection()
+        #self._setup_db_connection()
         self._setup_queues()
         #self._setup_asynchronous_queue_watchers()
         # Job metadata
@@ -465,21 +477,13 @@ class NetworkCandidateGraph(network.CandidateGraph):
         """
         Set up a database connection and session(s)
         """
-
-        db_uri = 'postgresql://{}:{}@{}:{}/{}'.format(config['database']['database_username'],
-                                                      config['database']['database_password'],
-                                                      config['database']['database_host'],
-                                                      config['database']['pgbouncer_port'],
-                                                      config['database']['database_name'])
-        self._engine = create_engine(db_uri, pool_size=2)
-        #self._connection = self._engine.connect()
-        self.session = scoped_session(sessionmaker(bind=self._engine))
-
-        # TODO: This adds the tables to the db if they do not exist already
-        Base.metadata.bind = self._engine
-        Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__,
+        try:
+            Base.metadata.bind = engine
+            Base.metadata.create_all(tables=[Network.__table__, Overlay.__table__,
                                          Edges.__table__, Costs.__table__, Matches.__table__,
                                          Cameras.__table__])
+        except ValueError:
+            warnings.warn('No SQLAlchemy engine available. Tables not pushed.')
 
     def _setup_queues(self):
         """
@@ -598,8 +602,9 @@ class NetworkCandidateGraph(network.CandidateGraph):
         ) AS noded_lines
     )
 )"""
-        oquery = self.session.query(Overlay)
-        iquery = self.session.query(Images)
+        session = Session()
+        oquery = session.query(Overlay)
+        iquery = session.query(Images)
 
         rows = []
         for q in self._engine.execute(query).fetchall():
@@ -618,16 +623,18 @@ class NetworkCandidateGraph(network.CandidateGraph):
             if res is None:
                 rows.append(o)
         
-        self.session.bulk_save_objects(rows)
-        self.session.commit()
+        session.bulk_save_objects(rows)
+        session.commit()
 
-        res = oquery.filter(func.cardinality(Overlay.overlaps) <= 1)
+        res = oquery.filter(sqlalchemy.func.cardinality(Overlay.overlaps) <= 1)
         res.delete(synchronize_session=False)
-        self.session.commit()
+        session.commit()
+        session.close()
 
     def create_network(self, nodes=[]):
         cmds = 0
-        for res in self.session.query(Overlay):
+        session = Session()
+        for res in session.query(Overlay):
             msg = json.dumps({'oid':res.id,'time':time.time()})
 
             # If nodes are passed, process only those overlaps containing
@@ -646,6 +653,7 @@ class NetworkCandidateGraph(network.CandidateGraph):
                     mem=config['cluster']['processing_memory'],
                     queue=config['cluster']['queue'],
                     env=config['python']['env_name'])
+        session.close()
 
     @classmethod
     def from_database(cls, query_string='SELECT * FROM public.images'):
@@ -688,8 +696,8 @@ FROM
 	i as i1, i as i2
 WHERE ST_INTERSECTS(i1.footprint_latlon, i2.footprint_latlon) = TRUE
 AND i1.id < i2.id""".format(query_string)
-        _, engine = new_connection(config)
-        res = engine.execute(composite_query)
+        session = Session()
+        res = session.execute(composite_query)
 
         adjacency = defaultdict(list)
         adjacency_lookup = {}
@@ -700,9 +708,10 @@ AND i1.id < i2.id""".format(query_string)
             adjacency_lookup[dpath] = did
             if spath != dpath:
                 adjacency[spath].append(dpath)
-
+        session.close()
         # Add nodes that do not overlap any images
         obj = cls.from_adjacency(adjacency, node_id_map=adjacency_lookup, config=config)
+    
         return obj
 
     @classmethod
@@ -797,7 +806,7 @@ class AsynchronousFailedWatcher(threading.Thread):
 class SubCandidateGraph(nx.graphviews.SubGraph, NetworkCandidateGraph):
     def __init__(self, *args, **kwargs):
         super(SubCandidateGraph, self).__init__(*args, **kwargs)
-        self._setup_db_connection()
+        #self._setup_db_connection()
         self._setup_queues()
         self.processing_queue = config['redis']['processing_queue']
 

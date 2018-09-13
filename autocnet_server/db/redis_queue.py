@@ -3,7 +3,7 @@ import time
 
 import numpy as np
 
-from autocnet_server.utils.utils import slurm_walltime_to_seconds
+from plurmy import slurm_walltime_to_seconds
 
 def pop_computetime_push(queue, inqueue, outqueue):
     """
