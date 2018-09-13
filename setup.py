@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 setup(
     name='autocnet_server',
-    version='0.1.3',
+    version='0.1.4',
     long_description='',
     packages=find_packages(),
     include_package_data=True,

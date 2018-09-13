@@ -13,12 +13,7 @@ from autocnet_server.graph.graph import NetworkNode, NetworkEdge
 with open(os.environ['autocnet_config'], 'r') as f:
     config = yaml.load(f)
 
-class Parent:
-    def __init__(self, config):
-        self.session, _ = connection.new_connection(config)
-        self.session.begin()
-
-def main(msg, config, parent=None):
+def main(msg, config):
     
     # This should be the minimal amount of data necessary to create
     # a NetworkNode or NetworkEdge object. The id in the message is 
@@ -32,11 +27,6 @@ def main(msg, config, parent=None):
         obj = NetworkEdge()
         obj.source = NetworkNode(node_id=id[0], image_path=image_path[0])
         obj.destination = NetworkNode(node_id=id[1], image_path=image_path[1])
-
-    # Patch in a DB session through the 'parent' since the NetworkObj classes
-    # make use of a shared DB connection. Here we make a single connection
-    # per job and let the DB manage everything
-    obj.parent = Parent(config)
 
     # Grab the function and apply. This assumes that the func is going to
     # have a True/False return value. Basically, all processing needs to
@@ -54,11 +44,12 @@ def main(msg, config, parent=None):
     return msg
 
 if __name__ == '__main__':
-    queue = StrictRedis(host="smalls", port=8000, db=0)
+    conf = config['redis']
+    queue = StrictRedis(host=conf['host'], port=conf['port'], db=0)
 
     msg = pop_computetime_push(queue,
-                               config['redis']['processing_queue'],
-                               config['redis']['working_queue'])
+                               conf['processing_queue'],
+                               conf['working_queue'])
 
     # In order to pop an entry off the queue, we need the exact contents
     #remove_key = copy.deepcopy(msg)
