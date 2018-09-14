@@ -46,14 +46,12 @@ from autocnet.utils import utils
 from autocnet.io import keypoints as io_keypoints
 from autocnet.transformation.fundamental_matrix import compute_reprojection_error
 
-from plio.utils import generate_vrt
-
 from plurmy import spawn, spawn_jobarr, slurm_walltime_to_seconds
 from autocnet_server import Session, engine
 from autocnet_server.db.model import Images, Keypoints, Matches, Cameras, Network, Base, Overlay, Edges, Costs
 from autocnet_server.db.connection import new_connection, Parent
 from autocnet_server.db.wrappers import DbDataFrame
-from autocnet_server.sensors.csm import create_camera, generate_latlon_footprint
+from autocnet_server.sensors.csm import create_camera, generate_latlon_footprint, generate_vrt
 
 
 class NetworkNode(Node):
@@ -83,7 +81,7 @@ class NetworkNode(Node):
                 cam = Cameras(camera=serialized_camera)
             except:
                 cam = None
-            kpspath = io_keypoints.create_output_path(self.geodata)
+            kpspath = io_keypoints.create_output_path(self.geodata.file_name)
 
             # Create the keypoints entry
             kps = Keypoints(path=kpspath, nkeypoints=0)
