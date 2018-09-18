@@ -16,11 +16,6 @@ from plio.utils.utils import find_in_dict
 from plio.io.io_json import NumpyEncoder
 
 
-
-
-
-from plio.spatial.footprint import generate_gcps
-
 def data_from_cube(header):
     """
     Take an ISIS Cube header and normalize back to PVL keywords.
