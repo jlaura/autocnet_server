@@ -154,7 +154,8 @@ class NetworkNode(Node):
 
     @descriptors.setter
     def descriptors(self, desc):
-        io_keypoints.to_hdf(self.keypoint_file, descriptors=desc)
+        if desc:
+            io_keypoints.to_hdf(self.keypoint_file, descriptors=desc)
 
     @property
     def nkeypoints(self):
